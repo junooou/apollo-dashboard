@@ -10,17 +10,19 @@ sourcing runs.
 
 ## Setup
 
-You need **Node 20+** and an **Apollo API key**.
+You need **Node 20+** and an **Apollo API key**. Google Sheets/Docs export and
+the outreach email generator are optional add-ons, each gated behind their own
+key — the core sourcing workflow runs without either.
 
 ```bash
 cd apollo-dashboard
 npm install
-cp .env.local.example .env.local   # then paste your key into it
-npm run check-key                  # pre-flight: verifies the key works
+cp .env.local.example .env.local   # then paste your keys into it
+npm run check-key                  # pre-flight: verifies the Apollo key works
 npm run dev                        # http://localhost:3100
 ```
 
-### Getting an API key
+### Getting an Apollo API key
 
 Apollo → **Settings → Integrations → API → API Keys**. The key needs master
 scope to reach both the search and enrichment endpoints.
@@ -29,6 +31,19 @@ This is required. The MCP connector used inside Claude Code cannot be used here 
 MCP connectors only exist inside an AI client and cannot be called from a web
 server. The key is read server-side from `.env.local` and is never sent to the
 browser.
+
+### Getting an OpenAI API key (optional — outreach email generator)
+
+platform.openai.com → **API keys → Create new secret key**. Powers
+`app/api/generate-template/route.ts` — see
+[Outreach email generator](#outreach-email-generator) below. Without
+`OPENAI_API_KEY` set, that one feature errors; the rest of the app is
+unaffected.
+
+### Google Sheets/Docs export (optional)
+
+A service account, not a personal API key — see `GOOGLE_SHEETS_SETUP.md` for
+the full walkthrough, and `npm run check-drive` to verify it once configured.
 
 ## How a run works
 
@@ -135,6 +150,20 @@ discarded rather than silently passed to Apollo.
   roughly 8 extra credits each)
 - **Search criteria** sent to Apollo: titles, seniorities, locations
 - **Relevance rules** applied locally at no cost
+
+## Outreach email generator
+
+On the main dashboard, below the sourcing workflow. Generates a multi-email
+outreach sequence scoped to either a **company** or an **industry** — pick the
+scope, enter the target and any extra context, and it calls OpenAI
+(`app/api/generate-template/route.ts`, `OPENAI_API_KEY` required) for a named
+campaign: a sequencing rationale plus subject/body per email.
+
+You can ask for a **revision** in plain English (e.g. "make the second email
+shorter") without starting over, and **save the result as a Google Doc**
+(`lib/docs.ts`) into the same Drive folder used for Sheets export
+(`GOOGLE_PARENT_FOLDER_ID`) — so it needs the Google service account set up too
+if you want that step, not just the OpenAI key.
 
 ## Colour
 

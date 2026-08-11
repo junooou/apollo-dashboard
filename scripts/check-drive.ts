@@ -1,7 +1,8 @@
 /**
- * Pre-flight check for the Google Sheets integration. Run `npm run
- * check-sheets` after filling in GOOGLE_SERVICE_ACCOUNT_EMAIL and
- * GOOGLE_PRIVATE_KEY in .env.local.
+ * Pre-flight check for the Google Drive integration (the shared parent
+ * folder that holds both Sheets and Docs output). Run `npm run check-drive`
+ * after filling in GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY in
+ * .env.local.
  *
  * It creates a throwaway spreadsheet, writes a row, reads it back, then
  * (if GOOGLE_SHEET_ID is set) confirms read access to your real sheet — the
@@ -35,7 +36,7 @@ function info(msg: string) {
 }
 
 async function main() {
-  console.log("\nGoogle Sheets pre-flight\n");
+  console.log("\nGoogle Drive pre-flight\n");
 
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL?.trim();
   const key = process.env.GOOGLE_PRIVATE_KEY?.trim();
@@ -61,7 +62,7 @@ async function main() {
   let spreadsheetId: string | undefined;
   if (parentFolderId) {
     const created = await createSpreadsheet(
-      `apollo-dashboard check-sheets ${new Date().toISOString()}`,
+      `apollo-dashboard check-drive ${new Date().toISOString()}`,
       ["Sheet1"],
       { shareWithEmail: process.env.GOOGLE_CHECK_SHARE_WITH || undefined, parentFolderId },
     );

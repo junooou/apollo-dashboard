@@ -213,8 +213,11 @@ Console setup steps.
 explicitly shared with its `client_email`, as Editor.** This is the most
 common failure mode — a 403/404 from `app/api/sheets/route.ts` almost always
 means the target sheet was never shared, not a code bug. `npm run
-check-sheets` verifies the credentials and, if `GOOGLE_SHEET_ID` is set,
-confirms that specific sheet is reachable.
+check-drive` verifies the credentials and, if `GOOGLE_SHEET_ID` is set,
+confirms that specific sheet is reachable. Named for the shared Drive folder
+(`GOOGLE_PARENT_FOLDER_ID`) rather than "sheets" specifically, since that
+folder now holds both generated spreadsheets and the email-template Docs from
+`lib/docs.ts`.
 
 **`createSpreadsheet()` needs `parentFolderId` to work at all** for a bare
 (non-Workspace) service account: such accounts have zero Drive storage quota

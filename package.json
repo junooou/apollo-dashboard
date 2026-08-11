@@ -9,7 +9,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check-key": "tsx scripts/check-key.ts",
-    "check-sheets": "tsx scripts/check-sheets.ts"
+    "check-drive": "tsx scripts/check-drive.ts"
   },
   "dependencies": {
     "googleapis": "^144.0.0",

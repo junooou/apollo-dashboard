@@ -185,7 +185,7 @@ npm install
 Run:
 
 ```bash
-npm run check-sheets
+npm run check-drive
 ```
 
 A successful test should look similar to:
@@ -224,7 +224,7 @@ npm install
 Then retry:
 
 ```bash
-npm run check-sheets
+npm run check-drive
 ```
 
 ### `storageQuotaExceeded`
@@ -248,7 +248,7 @@ with the Shared Drive folder ID.
 Then run:
 
 ```bash
-npm run check-sheets
+npm run check-drive
 ```
 
 again.

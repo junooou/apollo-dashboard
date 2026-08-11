@@ -52,6 +52,7 @@ type ExistingContact = {
 type Stage = "idle" | "searching" | "review" | "enriching" | "done";
 
 export default function Dashboard() {
+  const [workspace, setWorkspace] = useState<"leads" | "outreach">("leads");
   const [company, setCompany] = useState("");
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -573,20 +574,82 @@ export default function Dashboard() {
 
   return (
     <div className="shell">
-      <header className="top">
-        <h1>Apollo Lead Sourcing</h1>
-        <div className="header-meta">
-          <span className="credit-pill" title="Lead credits remaining on this Apollo account">
-            Credits
-            <strong>{credits != null ? credits.toLocaleString() : "—"}</strong>
-          </span>
-          <a href="/filters" className="inline-check">
-            <Sliders size={15} />
-            Filters
-          </a>
+      <header className="product-hero">
+        <div className="product-hero-top">
+          <img
+            src="/voncierge-logo.svg"
+            alt="Voncierge"
+            className="brand-logo"
+          />
+
+          <div className="header-meta">
+            <span
+              className="credit-pill"
+              title="Lead credits remaining on this Apollo account"
+            >
+              <span>APOLLO CREDITS</span>
+              <strong>
+                {credits != null ? credits.toLocaleString() : "—"}
+              </strong>
+            </span>
+
+          </div>
         </div>
+
+        <div className="product-hero-copy">
+          <div className="product-eyebrow">
+            VONCIERGE INTERNAL
+            <span className="ai-pill">✦ AI powered</span>
+          </div>
+
+          <h1>Outbound Intelligence</h1>
+
+          <p>
+            Source the right decision-makers, generate personalised outreach,
+            and build campaigns from one workspace.
+          </p>
+        </div>
+
+        <nav className="workspace-tabs" aria-label="Workspace">
+          <button
+            type="button"
+            className={workspace === "leads" ? "active" : ""}
+            onClick={() => setWorkspace("leads")}
+          >
+            <span className="workspace-tab-number">01</span>
+            Lead Sourcing
+          </button>
+
+          <button
+            type="button"
+            className={workspace === "outreach" ? "active" : ""}
+            onClick={() => setWorkspace("outreach")}
+          >
+            <span className="workspace-tab-number">02</span>
+            ✦ Outreach Studio
+          </button>
+        </nav>
       </header>
 
+      {workspace === "outreach" && (
+        <div className="workspace-view workspace-view-outreach">
+          <div className="workspace-intro">
+            <span className="workspace-kicker">OUTREACH STUDIO</span>
+
+            <h2>Turn research into outreach.</h2>
+
+            <p>
+              Generate company-specific or reusable industry campaigns using
+              Voncierge&apos;s approved outreach playbook.
+            </p>
+          </div>
+
+          <OutreachGenerator />
+        </div>
+      )}
+
+      {workspace === "leads" && (
+        <div className="workspace-view">
       {!hasKey && (
         <div className="notice error">
           <AlertTriangle size={16} />
@@ -608,15 +671,29 @@ export default function Dashboard() {
 
       {/* ---------------- Stage 1: search ---------------- */}
       <section className="panel" data-stage="search">
+      <div className="panel-heading-row">
         <h2>
-          <span className="step-num" data-state={stage !== "idle" ? "done" : undefined}>
+          <span
+            className="step-num"
+            data-state={stage !== "idle" ? "done" : undefined}
+          >
             1
           </span>
-          {!searchOpen && selectedOrg ? selectedOrg.name : "Find a company"}
+
+          {!searchOpen && selectedOrg
+            ? selectedOrg.name
+            : "Find a company"}
+        </h2>
+
+        <div className="panel-heading-actions">
+          <a href="/filters" className="filter-settings-link">
+            <Sliders size={15} />
+            Targeting filters
+          </a>
+
           {!searchOpen && (
             <button
               className="ghost"
-              style={{ marginLeft: "auto" }}
               onClick={() => setSearchOpen(true)}
               disabled={busy}
             >
@@ -624,7 +701,8 @@ export default function Dashboard() {
               Change
             </button>
           )}
-        </h2>
+        </div>
+      </div>
 
         {/* Collapsed: the company name already moved into the heading above,
             so this bar carries only what's left — domain and active filters. */}
@@ -1525,7 +1603,8 @@ export default function Dashboard() {
         </p>
       )}
 
-      <OutreachGenerator />
+        </div>
+      )}
 
     </div>
   );

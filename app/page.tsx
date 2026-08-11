@@ -1,0 +1,1245 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { MultiSelect } from "./components/Controls";
+import { DeptChip } from "./components/DeptChip";
+import {
+  AlertCircle,
+  AlertTriangle,
+  Building,
+  Check,
+  Download,
+  Info,
+  Mail,
+  MailOff,
+  Save,
+  Search,
+  Sliders,
+  Upload,
+  Users,
+} from "./components/Icons";
+import { buildRunLog } from "@/lib/runlog";
+import {
+  COUNTRIES,
+  DEPARTMENTS,
+  REGIONS,
+  SENIORITIES,
+  countriesForRegion,
+} from "@/lib/taxonomy";
+import type {
+  EnrichedContact,
+  Organization,
+  RunSummary,
+  ScoredCandidate,
+  Settings,
+} from "@/lib/types";
+import type { NewsItem } from "@/lib/news";
+
+type ExistingContactMatch = { sheetId: string; sheetName: string; count: number };
+
+type Stage = "idle" | "searching" | "review" | "enriching" | "done";
+
+export default function Dashboard() {
+  const [company, setCompany] = useState("");
+  const [stage, setStage] = useState<Stage>("idle");
+  const [error, setError] = useState<string | null>(null);
+
+  const [orgs, setOrgs] = useState<Organization[]>([]);
+  const [selectedOrg, setSelectedOrg] = useState<Organization | null>(null);
+  /**
+   * Step 1 collapses once a company resolves, so the review table isn't pushed
+   * below a form that has already done its job. Reopening it is one click.
+   */
+  const [searchOpen, setSearchOpen] = useState(true);
+
+  const [candidates, setCandidates] = useState<ScoredCandidate[]>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showRejected, setShowRejected] = useState(false);
+  const [searchMeta, setSearchMeta] = useState<{
+    rawSearchResults: number;
+    passedFilter: number;
+    totalAvailable: number;
+  } | null>(null);
+  const [diagnostics, setDiagnostics] = useState<string[]>([]);
+
+  // Quick filters on the landing page — override saved settings for this search.
+  const [region, setRegion] = useState<string>("Singapore only");
+  const [countries, setCountries] = useState<string[]>(["Singapore"]);
+  const [departments, setDepartments] = useState<string[]>([]);
+  const [seniorities, setSeniorities] = useState<string[]>([]);
+
+  // Post-result filters — applied client-side, no re-search needed.
+  const [query, setQuery] = useState("");
+  const [filterDepartments, setFilterDepartments] = useState<string[]>([]);
+  const [emailOnly, setEmailOnly] = useState(false);
+
+  const [contacts, setContacts] = useState<EnrichedContact[]>([]);
+  const [summary, setSummary] = useState<RunSummary | null>(null);
+
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [credits, setCredits] = useState<number | null>(null);
+  const [hasKey, setHasKey] = useState<boolean>(true);
+  const [savedTo, setSavedTo] = useState<string | null>(null);
+
+  // Push to Sheet — lists spreadsheets from GOOGLE_PARENT_FOLDER_ID, appends
+  // (never overwrites) the current run's contacts to whichever one is picked.
+  const [pushOpen, setPushOpen] = useState(false);
+  const [sheets, setSheets] = useState<{ id: string; name: string }[]>([]);
+  const [sheetsLoading, setSheetsLoading] = useState(false);
+  const [sheetsError, setSheetsError] = useState<string | null>(null);
+  const [selectedSheetId, setSelectedSheetId] = useState("");
+  const [pushing, setPushing] = useState(false);
+  const [pushResult, setPushResult] = useState<string | null>(null);
+
+  // Company overview — latest news (Google News RSS) and a check for
+  // contacts already logged for this company across the Sheets folder.
+  // Both fire as soon as a company resolves, independent of the people search.
+  const [news, setNews] = useState<NewsItem[] | null>(null);
+  const [newsLoading, setNewsLoading] = useState(false);
+  const [newsError, setNewsError] = useState<string | null>(null);
+
+  const [existingContacts, setExistingContacts] = useState<{
+    matches: ExistingContactMatch[];
+    totalContacts: number;
+  } | null>(null);
+  const [existingLoading, setExistingLoading] = useState(false);
+  const [existingError, setExistingError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedOrg) {
+      setNews(null);
+      setNewsError(null);
+      setExistingContacts(null);
+      setExistingError(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    setNewsLoading(true);
+    setNewsError(null);
+    fetch(`/api/news?company=${encodeURIComponent(selectedOrg.name)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        if (d.error) throw new Error(d.error);
+        setNews(d.items);
+      })
+      .catch((err) => {
+        if (!cancelled) setNewsError(err instanceof Error ? err.message : "Failed to load news");
+      })
+      .finally(() => {
+        if (!cancelled) setNewsLoading(false);
+      });
+
+    setExistingLoading(true);
+    setExistingError(null);
+    fetch(`/api/sheets?checkCompany=${encodeURIComponent(selectedOrg.name)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        if (d.error) throw new Error(d.error);
+        setExistingContacts(d);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setExistingError(err instanceof Error ? err.message : "Failed to check existing sheets");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setExistingLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedOrg]);
+
+  const refreshCredits = useCallback(async () => {
+    try {
+      const res = await fetch("/api/credits");
+      const data = await res.json();
+      setCredits(data.credits);
+      setHasKey(data.hasKey);
+    } catch {
+      /* header detail only — never block the workflow on this */
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshCredits();
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((d) => {
+        setSettings(d.settings);
+        // Seed the quick filters from saved settings so the two stay in sync.
+        if (d.settings?.personLocations) {
+          setCountries(d.settings.personLocations);
+          const match = REGIONS.find(
+            (r) =>
+              r.countries.length === d.settings.personLocations.length &&
+              r.countries.every((c: string) =>
+                d.settings.personLocations.includes(c),
+              ),
+          );
+          setRegion(match?.label ?? "Custom");
+        }
+        if (d.settings?.departments) setDepartments(d.settings.departments);
+        if (d.settings?.personSeniorities) setSeniorities(d.settings.personSeniorities);
+      })
+      .catch(() => undefined);
+  }, [refreshCredits]);
+
+  const kept = useMemo(() => candidates.filter((c) => c.decision.keep), [candidates]);
+  const rejected = useMemo(() => candidates.filter((c) => !c.decision.keep), [candidates]);
+
+  /** Post-result filtering — narrows what's shown without another API call. */
+  const visible = useMemo(() => {
+    const base = showRejected ? candidates : kept;
+    const q = query.trim().toLowerCase();
+    return base.filter((c) => {
+      if (emailOnly && !c.hasEmail) return false;
+      if (
+        filterDepartments.length > 0 &&
+        !c.decision.departments?.some((d) => filterDepartments.includes(d))
+      ) {
+        return false;
+      }
+      if (q) {
+        const haystack =
+          `${c.firstname} ${c.lastname} ${c.title}`.toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [candidates, kept, showRejected, query, filterDepartments, emailOnly]);
+
+  /** Filename shown on the download button, matching the saved-file convention. */
+  const csvName = `${(selectedOrg?.name || company || "contacts").replace(/[/\\:*?"<>|]/g, "")}.csv`;
+
+  const departmentOptions = DEPARTMENTS.map((d) => ({
+    value: d.id,
+    label: d.label,
+    hint: d.recommended ? "recommended" : undefined,
+  }));
+
+  const selectedCount = selectedIds.size;
+  // Apollo charges 1-9 credits per person and 0 when it finds nothing, so the
+  // honest estimate is a range rather than a single number.
+  const creditEstimate = `${selectedCount}–${selectedCount * 9}`;
+
+  async function post<T>(url: string, body: unknown): Promise<T> {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
+    return data as T;
+  }
+
+  async function handleSearch(org?: Organization) {
+    if (!company.trim()) return;
+    setError(null);
+    setSavedTo(null);
+    setStage("searching");
+    setContacts([]);
+    setSummary(null);
+
+    try {
+      // Resolve the company first unless the user already picked an org.
+      let target = org ?? selectedOrg;
+      if (!target) {
+        const { organizations } = await post<{ organizations: Organization[] }>(
+          "/api/company",
+          { query: company },
+        );
+        setOrgs(organizations);
+        if (organizations.length === 0) {
+          setError(
+            `No Apollo organization found for "${company}". Try the company's domain instead (e.g. dbs.com).`,
+          );
+          setStage("idle");
+          return;
+        }
+        if (organizations.length > 1) {
+          // Let the user disambiguate — group structures often span domains.
+          setStage("idle");
+          return;
+        }
+        target = organizations[0];
+        setSelectedOrg(target);
+      }
+
+      const data = await post<{
+        candidates: ScoredCandidate[];
+        rawSearchResults: number;
+        passedFilter: number;
+        totalAvailable: number;
+        diagnostics?: string[];
+        settings: Settings;
+      }>("/api/search", {
+        companyName: target.name || company,
+        organizationIds: target.id ? [target.id] : undefined,
+        domains: target.domain ? [target.domain, ...target.altDomains] : undefined,
+        // Quick filters override saved settings for this search only.
+        overrides: {
+          personLocations: countries,
+          departments,
+          ...(seniorities.length > 0 ? { personSeniorities: seniorities } : {}),
+        },
+      });
+
+      // Show Apollo's canonical name rather than what was typed — searching
+      // "maybank" resolves to "Maybank", and the field should say which record
+      // is actually being searched.
+      if (target.name) setCompany(target.name);
+
+      // Collapse only on a search that found people. A zero-result run leaves
+      // step 1 open, because adjusting the company or the filters is the next
+      // thing you'll do and hiding those controls would just cost a click.
+      setSearchOpen(data.candidates.length === 0);
+
+      setCandidates(data.candidates);
+      setSettings(data.settings);
+      setDiagnostics(data.diagnostics ?? []);
+      setSearchMeta({
+        rawSearchResults: data.rawSearchResults,
+        passedFilter: data.passedFilter,
+        totalAvailable: data.totalAvailable,
+      });
+
+      // Pre-tick the top N that passed, skipping anyone already in a CSV and
+      // anyone Apollo holds no email for — those would almost certainly fail
+      // enrichment and eat a slot in the shortlist.
+      const target_n = data.settings.contactTarget;
+      const preselected = data.candidates
+        .filter((c) => c.decision.keep && !c.alreadySourcedIn && c.hasEmail)
+        .slice(0, target_n)
+        .map((c) => c.apolloPersonId);
+      setSelectedIds(new Set(preselected));
+      setStage("review");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Search failed");
+      setStage("idle");
+    }
+  }
+
+  async function handleEnrich() {
+    if (selectedCount === 0) return;
+    setError(null);
+    setStage("enriching");
+
+    try {
+      const chosen = candidates.filter((c) => selectedIds.has(c.apolloPersonId));
+      const data = await post<{ contacts: EnrichedContact[]; summary: RunSummary }>(
+        "/api/enrich",
+        {
+          companyName: selectedOrg?.name || company,
+          candidates: chosen,
+          targetDomains: selectedOrg
+            ? [selectedOrg.domain, ...selectedOrg.altDomains]
+            : [],
+          rawSearchResults: searchMeta?.rawSearchResults,
+          passedFilter: searchMeta?.passedFilter,
+        },
+      );
+      setContacts(data.contacts);
+      setSummary(data.summary);
+      setStage("done");
+      refreshCredits();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Enrichment failed");
+      setStage("review");
+    }
+  }
+
+  async function handleDownload() {
+    const res = await fetch("/api/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        companyName: selectedOrg?.name || company,
+        contacts,
+        mode: "download",
+      }),
+    });
+    if (!res.ok) {
+      setError("Export failed");
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${selectedOrg?.name || company}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleSaveToFolder() {
+    try {
+      const data = await post<{ savedTo: string }>("/api/export", {
+        companyName: selectedOrg?.name || company,
+        contacts,
+        mode: "save",
+      });
+      setSavedTo(data.savedTo);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
+    }
+  }
+
+  async function togglePush() {
+    const next = !pushOpen;
+    setPushOpen(next);
+    setPushResult(null);
+    if (next && sheets.length === 0 && !sheetsLoading) {
+      setSheetsLoading(true);
+      setSheetsError(null);
+      try {
+        const res = await fetch("/api/sheets?list=1");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Failed to list sheets");
+        setSheets(data.sheets);
+        if (data.sheets.length > 0) setSelectedSheetId(data.sheets[0].id);
+      } catch (err) {
+        setSheetsError(err instanceof Error ? err.message : "Failed to list sheets");
+      } finally {
+        setSheetsLoading(false);
+      }
+    }
+  }
+
+  async function handlePushToSheet() {
+    if (!selectedSheetId) return;
+    setPushing(true);
+    setPushResult(null);
+    try {
+      const data = await post<{ rowsPushed: number; headerAdded: boolean }>("/api/sheets", {
+        mode: "pushContacts",
+        spreadsheetId: selectedSheetId,
+        contacts,
+      });
+      const sheetName = sheets.find((s) => s.id === selectedSheetId)?.name ?? "sheet";
+      setPushResult(
+        `Added ${data.rowsPushed} row${data.rowsPushed === 1 ? "" : "s"} to "${sheetName}".`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Push to Sheet failed");
+    } finally {
+      setPushing(false);
+    }
+  }
+
+  function toggle(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function reset() {
+    setStage("idle");
+    setCandidates([]);
+    setSelectedIds(new Set());
+    setContacts([]);
+    setSummary(null);
+    setOrgs([]);
+    setSelectedOrg(null);
+    setSearchMeta(null);
+    setSavedTo(null);
+    setError(null);
+    setDiagnostics([]);
+    setSearchOpen(true);
+    setPushOpen(false);
+    setPushResult(null);
+    setSheetsError(null);
+  }
+
+  const busy = stage === "searching" || stage === "enriching";
+
+  return (
+    <div className="shell">
+      <header className="top">
+        <h1>Apollo Lead Sourcing</h1>
+        <div className="header-meta">
+          <span className="credit-pill" title="Lead credits remaining on this Apollo account">
+            Credits
+            <strong>{credits != null ? credits.toLocaleString() : "—"}</strong>
+          </span>
+          <a href="/filters" className="inline-check">
+            <Sliders size={15} />
+            Filters
+          </a>
+        </div>
+      </header>
+
+      {!hasKey && (
+        <div className="notice error">
+          <AlertTriangle size={16} />
+          <div>
+            <strong>No Apollo API key configured.</strong> Copy{" "}
+            <span className="mono">.env.local.example</span> to{" "}
+            <span className="mono">.env.local</span>, add your key from Apollo →
+            Settings → Integrations → API, then restart the dev server.
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div className="notice error">
+          <AlertCircle size={16} />
+          <div>{error}</div>
+        </div>
+      )}
+
+      {/* ---------------- Stage 1: search ---------------- */}
+      <section className="panel" data-stage="search">
+        <h2>
+          <span className="step-num" data-state={stage !== "idle" ? "done" : undefined}>
+            1
+          </span>
+          {!searchOpen && selectedOrg ? selectedOrg.name : "Find a company"}
+          {!searchOpen && (
+            <button
+              className="ghost"
+              style={{ marginLeft: "auto" }}
+              onClick={() => setSearchOpen(true)}
+              disabled={busy}
+            >
+              <Search size={14} />
+              Change
+            </button>
+          )}
+        </h2>
+
+        {/* Collapsed: the company name already moved into the heading above,
+            so this bar carries only what's left — domain and active filters. */}
+        {!searchOpen && selectedOrg && (
+          <div className="chosen">
+            <Building size={16} />
+            <div className="chosen-meta">
+              <span className="mono">{selectedOrg.domain ?? "no domain on record"}</span>
+            </div>
+            <span className="chosen-filters small muted">
+              {countries.length ? countries.join(", ") : "Worldwide"}
+              {departments.length > 0 &&
+                ` · ${departments.length} department${departments.length === 1 ? "" : "s"}`}
+            </span>
+          </div>
+        )}
+
+        {/* Company overview — news and existing-contact check land as soon as
+            the company resolves, flowing directly under the summary bar
+            rather than in a separate boxed-off panel. */}
+        {!searchOpen && selectedOrg && (
+          <div className="overview">
+            {(existingLoading || existingContacts || existingError) && (
+              <div className="overview-block">
+                {existingLoading ? (
+                  <p className="small muted">Checking your sheets for existing contacts…</p>
+                ) : existingError ? (
+                  <p className="small muted">Couldn&apos;t check existing sheets ({existingError}).</p>
+                ) : existingContacts && existingContacts.totalContacts > 0 ? (
+                  <div className="notice warn">
+                    <AlertTriangle size={16} />
+                    <div>
+                      <strong>
+                        {existingContacts.totalContacts} contact
+                        {existingContacts.totalContacts === 1 ? "" : "s"} already logged
+                      </strong>{" "}
+                      for {selectedOrg.name}:{" "}
+                      {existingContacts.matches
+                        .map((m) => `${m.sheetName} (${m.count})`)
+                        .join(", ")}
+                    </div>
+                  </div>
+                ) : existingContacts ? (
+                  <p className="small muted">
+                    No existing contacts found for {selectedOrg.name} in your sheets.
+                  </p>
+                ) : null}
+              </div>
+            )}
+
+            {(newsLoading || news || newsError) && (
+              <div className="overview-block">
+                <div className="overview-label small muted">Latest news</div>
+                {newsLoading ? (
+                  <p className="small muted">Loading…</p>
+                ) : newsError ? (
+                  <p className="small muted">Couldn&apos;t load news ({newsError}).</p>
+                ) : news && news.length === 0 ? (
+                  <p className="small muted">No recent coverage found.</p>
+                ) : (
+                  <ul className="news-list">
+                    {news?.map((n, i) => (
+                      <li key={i}>
+                        <a href={n.link} target="_blank" rel="noopener noreferrer">
+                          {n.title}
+                        </a>
+                        <span className="small muted">
+                          {" "}
+                          — {n.source || "Google News"}
+                          {n.publishedAt
+                            ? ` · ${new Date(n.publishedAt).toLocaleDateString()}`
+                            : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {searchOpen && (
+        <>
+        <p className="panel-note">
+          Searching costs no credits and returns no email addresses. Credits are only
+          spent in step&nbsp;3, on the people you tick.
+        </p>
+        <div className="row">
+          <div className="grow">
+            <input
+              type="text"
+              placeholder="Company name or domain — e.g. DBS Bank, or dbs.com"
+              value={company}
+              onChange={(e) => {
+                setCompany(e.target.value);
+                setSelectedOrg(null);
+                setOrgs([]);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !busy) handleSearch();
+              }}
+              disabled={busy}
+            />
+          </div>
+          <button onClick={() => handleSearch()} disabled={busy || !company.trim()}>
+            {stage === "searching" ? (
+              <>
+                <span className="spinner" />
+                Searching…
+              </>
+            ) : (
+              <>
+                <Search size={15} />
+                Search
+              </>
+            )}
+          </button>
+          {stage !== "idle" && (
+            <button className="secondary" onClick={reset} disabled={busy}>
+              Reset
+            </button>
+          )}
+        </div>
+        {/* Quick filters — the settings people change run-to-run. */}
+        <div className="quickbar">
+          <div className="field">
+            <label htmlFor="region">Region</label>
+            <select
+              id="region"
+              value={region}
+              onChange={(e) => {
+                const label = e.target.value;
+                setRegion(label);
+                const list = countriesForRegion(label);
+                if (list) setCountries(list);
+              }}
+              disabled={busy}
+            >
+              {REGIONS.map((r) => (
+                <option key={r.label} value={r.label}>
+                  {r.label}
+                </option>
+              ))}
+              {region === "Custom" && <option value="Custom">Custom</option>}
+            </select>
+          </div>
+
+          <div className="field">
+            <label>Countries</label>
+            <MultiSelect
+              options={COUNTRIES.map((c) => ({ value: c, label: c }))}
+              selected={countries}
+              onChange={(next) => {
+                setCountries(next);
+                const match = REGIONS.find(
+                  (r) =>
+                    r.countries.length === next.length &&
+                    r.countries.every((c) => next.includes(c)),
+                );
+                setRegion(match?.label ?? "Custom");
+              }}
+              placeholder="Worldwide"
+            />
+          </div>
+
+          <div className="field">
+            <label>Departments</label>
+            <MultiSelect
+              options={departmentOptions}
+              selected={departments}
+              onChange={setDepartments}
+              placeholder="All departments"
+            />
+          </div>
+
+          <div className="field">
+            <label>Seniority</label>
+            <MultiSelect
+              options={SENIORITIES}
+              selected={seniorities}
+              onChange={setSeniorities}
+              placeholder="Default"
+            />
+          </div>
+        </div>
+
+        {orgs.length > 1 && !selectedOrg && (
+          <div style={{ marginTop: 18 }}>
+            <div className="notice info">
+              <Info size={16} />
+              <div>
+                Apollo holds several organizations under this name. Pick the right
+                one — group structures often split across domains, and the wrong
+                record can return nobody.
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Domain</th>
+                    <th>Employees</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {orgs.map((o) => (
+                    <tr key={o.id}>
+                      <td>{o.name}</td>
+                      <td className="mono">{o.domain ?? "—"}</td>
+                      <td>{o.employeeCount?.toLocaleString() ?? "—"}</td>
+                      <td>
+                        <button
+                          onClick={() => {
+                            setSelectedOrg(o);
+                            handleSearch(o);
+                          }}
+                        >
+                          Use this
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {selectedOrg && (
+          <p className="small muted inline-check" style={{ marginTop: 14 }}>
+            <Building size={15} />
+            Searching <strong style={{ color: "var(--text)" }}>
+              {selectedOrg.name}
+            </strong>
+            <span className="mono">{selectedOrg.domain ?? "no domain on record"}</span>
+          </p>
+        )}
+        </>
+        )}
+      </section>
+
+      {/* Loading gets shape, rather than a spinner floating in empty space. */}
+      {stage === "searching" && (
+        <section className="panel" data-stage="review" aria-live="polite">
+          <h2>
+            <span className="step-num">2</span>Searching Apollo…
+          </h2>
+          <div className="table-wrap" style={{ padding: 14 }}>
+            {[92, 78, 85, 70, 88, 64].map((w, i) => (
+              <div
+                key={i}
+                className="skeleton-row"
+                style={{ width: `${w}%`, marginBottom: i === 5 ? 0 : 14 }}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Empty state teaches the interface rather than saying "nothing here". */}
+      {stage === "review" && candidates.length === 0 && (
+        <section className="panel" data-stage="review">
+          <h2>
+            <span className="step-num">2</span>No one matched
+          </h2>
+          <div className="empty">
+            <Users size={30} />
+            <h3>Apollo has nobody at {selectedOrg?.name || company} for these filters</h3>
+            <p>
+              No credits were spent — searching is always free. The usual causes are a
+              location filter that excludes the company&apos;s home market, or a
+              job-title list that is too narrow.
+            </p>
+            {diagnostics.length > 0 && (
+              <ul
+                className="issues muted"
+                style={{ textAlign: "left", margin: "0 auto 20px", maxWidth: "60ch" }}
+              >
+                {diagnostics.map((d, i) => (
+                  <li key={i}>{d}</li>
+                ))}
+              </ul>
+            )}
+            <div className="row" style={{ justifyContent: "center" }}>
+              <button
+                onClick={() => {
+                  setCountries([]);
+                  setRegion("Worldwide (no filter)");
+                  handleSearch(selectedOrg ?? undefined);
+                }}
+              >
+                Retry without a location filter
+              </button>
+              <button className="secondary" onClick={reset}>
+                Try another company
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ---------------- Stage 2: review ---------------- */}
+      {(stage === "review" || stage === "enriching" || stage === "done") &&
+        candidates.length > 0 && (
+          <section className="panel" data-stage="review">
+            <h2>
+              <span className="step-num" data-state={stage === "done" ? "done" : undefined}>
+                2
+              </span>
+              Review before spending credits
+            </h2>
+            <p className="panel-note">
+              Nothing has cost anything yet. Tick the people worth enriching — the
+              score and the rule that matched are shown for each.
+            </p>
+
+            {diagnostics.length > 0 && (
+              <div className="notice warn">
+                <AlertTriangle size={16} />
+                <div>
+                  {diagnostics.map((d, i) => (
+                    <p key={i} style={{ margin: i === 0 ? 0 : "6px 0 0" }}>
+                      {d}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="readout">
+              <div className="cell">
+                <div className="label">Found</div>
+                <div className="value">{searchMeta?.rawSearchResults ?? 0}</div>
+              </div>
+              <div className="cell">
+                <div className="label">Passed filter</div>
+                <div className="value">{kept.length}</div>
+              </div>
+              <div className="cell">
+                <div className="label">Selected</div>
+                <div className="value">{selectedCount}</div>
+              </div>
+              <div className="cell">
+                <div className="label">Estimated credits</div>
+                <div className="value sub">{creditEstimate}</div>
+              </div>
+            </div>
+
+            {/* Filter what's already been returned — no re-search, no credits. */}
+            <div className="filterbar">
+              <div className="search-wrap">
+                <Search size={15} />
+                <input
+                  type="text"
+                  placeholder="Filter by name or title…"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  aria-label="Filter candidates by name or title"
+                />
+              </div>
+              <div style={{ minWidth: 180 }}>
+                <MultiSelect
+                  options={departmentOptions}
+                  selected={filterDepartments}
+                  onChange={setFilterDepartments}
+                  placeholder="All departments"
+                  compact
+                />
+              </div>
+              <label className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={emailOnly}
+                  onChange={(e) => setEmailOnly(e.target.checked)}
+                />
+                Has email
+              </label>
+              <label className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={showRejected}
+                  onChange={(e) => setShowRejected(e.target.checked)}
+                />
+                Show {rejected.length} filtered out
+              </label>
+              {(query || filterDepartments.length > 0 || emailOnly || showRejected) && (
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setQuery("");
+                    setFilterDepartments([]);
+                    setEmailOnly(false);
+                    setShowRejected(false);
+                  }}
+                >
+                  Clear filters
+                </button>
+              )}
+              <span className="count">
+                {visible.length} shown
+              </span>
+            </div>
+
+            <div className="row" style={{ marginBottom: 12 }}>
+              <button onClick={handleEnrich} disabled={busy || selectedCount === 0}>
+                {stage === "enriching" ? (
+                  <>
+                    <span className="spinner" />
+                    Enriching {selectedCount}…
+                  </>
+                ) : (
+                  <>
+                    <Mail size={15} />
+                    Enrich {selectedCount} selected
+                  </>
+                )}
+              </button>
+              <button
+                className="secondary"
+                onClick={() =>
+                  setSelectedIds(
+                    new Set(
+                      kept.filter((c) => c.hasEmail).map((c) => c.apolloPersonId),
+                    ),
+                  )
+                }
+                disabled={busy}
+              >
+                Select all with an email
+              </button>
+              <button
+                className="secondary"
+                onClick={() =>
+                  setSelectedIds(new Set(kept.map((c) => c.apolloPersonId)))
+                }
+                disabled={busy}
+              >
+                Select all passing
+              </button>
+              <button
+                className="secondary"
+                onClick={() => setSelectedIds(new Set())}
+                disabled={busy}
+              >
+                Clear
+              </button>
+              <button
+                className="secondary"
+                onClick={() =>
+                  setSelectedIds(
+                    new Set(visible.filter((c) => c.hasEmail).map((c) => c.apolloPersonId)),
+                  )
+                }
+                disabled={busy || visible.length === 0}
+                title="Select only the rows currently visible after filtering"
+              >
+                Select visible
+              </button>
+            </div>
+
+            <div className="table-wrap" style={{ maxHeight: 520, overflowY: "auto" }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th style={{ width: 32 }} />
+                    <th>Name</th>
+                    <th>Title</th>
+                    <th style={{ width: 70 }}>Email</th>
+                    <th style={{ width: 50 }}>Score</th>
+                    <th>Why</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((c) => (
+                    <tr
+                      key={c.apolloPersonId}
+                      className={c.decision.keep ? "" : "rejected"}
+                      data-selected={selectedIds.has(c.apolloPersonId)}
+                    >
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(c.apolloPersonId)}
+                          onChange={() => toggle(c.apolloPersonId)}
+                          disabled={busy}
+                          aria-label={`Select ${c.firstname} ${c.lastname}`}
+                        />
+                      </td>
+                      <td>
+                        <span className="name">
+                          {c.firstname} {c.lastname}
+                        </span>
+                        {c.alreadySourcedIn && (
+                          <>
+                            <br />
+                            <span className="badge warn" title="Already in a saved CSV">
+                              <Check size={11} />
+                              in {c.alreadySourcedIn}
+                            </span>
+                          </>
+                        )}
+                      </td>
+                      <td>
+                        {c.title}
+                        {c.decision.departments.length > 0 && (
+                          <div className="dept-list">
+                            {c.decision.departments.slice(0, 3).map((d) => (
+                              <DeptChip key={d} id={d} />
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        {c.hasEmail ? (
+                          <span className="badge good" title="Apollo holds an email">
+                            <Mail size={11} />
+                            yes
+                          </span>
+                        ) : (
+                          <span className="badge neutral" title="Apollo has no email on record">
+                            <MailOff size={11} />
+                            none
+                          </span>
+                        )}
+                      </td>
+                      <td className="mono">{c.decision.score}</td>
+                      <td className="reason">{c.decision.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+      {/* ---------------- Stage 3: summary ---------------- */}
+      {stage === "done" && summary && (
+        <section className="panel" data-stage="result">
+          <h2>
+            <span className="step-num" data-state="done">
+              3
+            </span>
+            {summary.company} — {summary.successful} contact
+            {summary.successful === 1 ? "" : "s"} ready
+          </h2>
+
+          <div className="readout">
+            <div className="cell">
+              <div className="label">In CSV</div>
+              <div className="value pos">{summary.successful}</div>
+            </div>
+            <div className="cell">
+              <div className="label">Dropped</div>
+              <div className="value">{summary.failed}</div>
+            </div>
+            <div className="cell">
+              <div className="label">Credits used</div>
+              <div className="value">{summary.creditsUsed ?? "—"}</div>
+            </div>
+            <div className="cell">
+              <div className="label">Waterfall recovered</div>
+              <div className="value sub">
+                {summary.waterfallRecovered} of {summary.waterfallAttempted}
+              </div>
+            </div>
+          </div>
+
+          <div className="row" style={{ marginBottom: 16 }}>
+            <button onClick={handleDownload} disabled={contacts.length === 0}>
+              <Download size={15} />
+              Download {csvName}
+            </button>
+            <button
+              className="secondary"
+              onClick={handleSaveToFolder}
+              disabled={contacts.length === 0}
+            >
+              <Save size={15} />
+              Save to Apollo Lead Generation
+            </button>
+            <button
+              className="secondary"
+              onClick={togglePush}
+              disabled={contacts.length === 0}
+              aria-expanded={pushOpen}
+            >
+              <Upload size={15} />
+              Push to Sheet
+            </button>
+          </div>
+
+          {pushOpen && (
+            <div className="row" style={{ marginBottom: 16, alignItems: "flex-end" }}>
+              <div className="field">
+                <label htmlFor="push-sheet">Sheet</label>
+                {sheetsLoading ? (
+                  <div className="small muted">Loading sheets…</div>
+                ) : sheetsError ? (
+                  <div className="small" style={{ color: "var(--bad)" }}>
+                    {sheetsError}
+                  </div>
+                ) : sheets.length === 0 ? (
+                  <div className="small muted">
+                    No sheets found in the configured Drive folder.
+                  </div>
+                ) : (
+                  <select
+                    id="push-sheet"
+                    value={selectedSheetId}
+                    onChange={(e) => setSelectedSheetId(e.target.value)}
+                    disabled={pushing}
+                  >
+                    {sheets.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+              <button
+                onClick={handlePushToSheet}
+                disabled={pushing || !selectedSheetId || sheets.length === 0}
+              >
+                <Upload size={15} />
+                {pushing ? "Pushing…" : "Push"}
+              </button>
+            </div>
+          )}
+
+          {pushResult && (
+            <div className="notice info">
+              <Check size={16} />
+              <div>{pushResult}</div>
+            </div>
+          )}
+
+          {savedTo && (
+            <div className="notice info">
+              <Check size={16} />
+              <div>
+                Saved to <span className="mono">{savedTo}</span>
+              </div>
+            </div>
+          )}
+
+          {summary.issues.length > 0 && (
+            <div className="notice warn">
+              <AlertTriangle size={16} />
+              <div>
+                <strong>Worth knowing about this run</strong>
+                <ul className="issues" style={{ marginTop: 6 }}>
+                  {summary.issues.map((issue, i) => (
+                    <li key={i}>{issue}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {summary.droppedContacts.length > 0 && (
+            <details style={{ marginBottom: 14 }}>
+              <summary className="small muted" style={{ cursor: "pointer" }}>
+                {summary.droppedContacts.length} dropped contacts and why
+              </summary>
+              <div className="table-wrap" style={{ marginTop: 10 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Title</th>
+                      <th>Reason</th>
+                      <th>Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summary.droppedContacts.map((c) => (
+                      <tr key={c.apolloPersonId}>
+                        <td>
+                          {c.firstname} {c.lastname}
+                        </td>
+                        <td className="small">{c.title}</td>
+                        <td>
+                          <span
+                            className={`badge ${
+                              c.dropped === "wrong_employer" ? "bad" : "warn"
+                            }`}
+                          >
+                            {c.dropped?.replace(/_/g, " ")}
+                          </span>
+                        </td>
+                        <td className="reason">{c.droppedDetail}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+
+          <details>
+            <summary className="small muted" style={{ cursor: "pointer" }}>
+              Run-log row for context.md
+            </summary>
+            <textarea
+              readOnly
+              value={buildRunLog(summary)}
+              style={{ marginTop: 8 }}
+              onFocus={(e) => e.currentTarget.select()}
+            />
+          </details>
+        </section>
+      )}
+
+      {settings && stage === "review" && (
+        <p className="small muted">
+          Waterfall {settings.waterfallEnabled ? "on" : "off"} (cap{" "}
+          {settings.waterfallCap}) · target {settings.contactTarget} contacts ·{" "}
+          <a href="/filters">change</a>
+        </p>
+      )}
+    </div>
+  );
+}

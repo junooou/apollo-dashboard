@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MultiSelect } from "./components/Controls";
 import { DeptChip } from "./components/DeptChip";
+import OutreachGenerator from "./components/OutreachGenerator";
 import {
   AlertCircle,
   AlertTriangle,
@@ -1523,6 +1524,9 @@ export default function Dashboard() {
           <a href="/filters">change</a>
         </p>
       )}
+
+      <OutreachGenerator />
+
     </div>
   );
 }

@@ -648,6 +648,12 @@ td .name {
   max-width: 66ch;
 }
 
+/* Data-bearing notices (e.g. the existing-contacts table) need to use the
+   full panel width instead of the prose-width cap above. */
+.notice.wide > div {
+  max-width: none;
+}
+
 .notice.error {
   background: var(--bad-bg);
   color: var(--bad);

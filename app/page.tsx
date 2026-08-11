@@ -12,6 +12,7 @@ import {
   Info,
   Mail,
   MailOff,
+  Plus,
   Save,
   Search,
   Sliders,
@@ -36,6 +37,16 @@ import type {
 import type { NewsItem } from "@/lib/news";
 
 type ExistingContactMatch = { sheetId: string; sheetName: string; count: number };
+type ExistingContact = {
+  firstname: string;
+  lastname: string;
+  title: string;
+  email: string;
+  linkedinUrl: string;
+  apolloPersonId: string;
+  sheetId: string;
+  sheetName: string;
+};
 
 type Stage = "idle" | "searching" | "review" | "enriching" | "done";
 
@@ -91,6 +102,13 @@ export default function Dashboard() {
   const [pushing, setPushing] = useState(false);
   const [pushResult, setPushResult] = useState<string | null>(null);
 
+  // Create New Sheet — creates a spreadsheet inside GOOGLE_PARENT_FOLDER_ID
+  // and adds it to the Push to Sheet picker, selected and ready to push to.
+  const [createOpen, setCreateOpen] = useState(false);
+  const [newSheetTitle, setNewSheetTitle] = useState("");
+  const [creatingSheet, setCreatingSheet] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
   // Company overview — latest news (Google News RSS) and a check for
   // contacts already logged for this company across the Sheets folder.
   // Both fire as soon as a company resolves, independent of the people search.
@@ -101,11 +119,15 @@ export default function Dashboard() {
   const [existingContacts, setExistingContacts] = useState<{
     matches: ExistingContactMatch[];
     totalContacts: number;
+    contacts: ExistingContact[];
   } | null>(null);
+  const [existingContactsOpen, setExistingContactsOpen] = useState(false);
   const [existingLoading, setExistingLoading] = useState(false);
   const [existingError, setExistingError] = useState<string | null>(null);
 
   useEffect(() => {
+    setExistingContactsOpen(false);
+
     if (!selectedOrg) {
       setNews(null);
       setNewsError(null);
@@ -433,6 +455,34 @@ export default function Dashboard() {
     }
   }
 
+  function toggleCreate() {
+    setCreateOpen((prev) => !prev);
+    setCreateError(null);
+  }
+
+  async function handleCreateSheet() {
+    const title = newSheetTitle.trim() || selectedOrg?.name || company;
+    if (!title) return;
+    setCreatingSheet(true);
+    setCreateError(null);
+    try {
+      const data = await post<{ spreadsheetId: string; url: string }>("/api/sheets", {
+        mode: "create",
+        title,
+      });
+      setSheets((prev) => [...prev, { id: data.spreadsheetId, name: title }]);
+      setSelectedSheetId(data.spreadsheetId);
+      setNewSheetTitle("");
+      setCreateOpen(false);
+      setPushOpen(true);
+      setPushResult(`Created "${title}" — pick it above and push.`);
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Create sheet failed");
+    } finally {
+      setCreatingSheet(false);
+    }
+  }
+
   function toggle(id: string) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -458,6 +508,9 @@ export default function Dashboard() {
     setPushOpen(false);
     setPushResult(null);
     setSheetsError(null);
+    setCreateOpen(false);
+    setNewSheetTitle("");
+    setCreateError(null);
   }
 
   const busy = stage === "searching" || stage === "enriching";
@@ -545,9 +598,9 @@ export default function Dashboard() {
                 ) : existingError ? (
                   <p className="small muted">Couldn&apos;t check existing sheets ({existingError}).</p>
                 ) : existingContacts && existingContacts.totalContacts > 0 ? (
-                  <div className="notice warn">
+                  <div className="notice warn wide">
                     <AlertTriangle size={16} />
-                    <div>
+                    <div style={{ width: "100%" }}>
                       <strong>
                         {existingContacts.totalContacts} contact
                         {existingContacts.totalContacts === 1 ? "" : "s"} already logged
@@ -556,6 +609,51 @@ export default function Dashboard() {
                       {existingContacts.matches
                         .map((m) => `${m.sheetName} (${m.count})`)
                         .join(", ")}
+                      <div style={{ marginTop: 6 }}>
+                        <button
+                          type="button"
+                          className="small"
+                          style={{
+                            background: "none",
+                            border: "none",
+                            padding: 0,
+                            textDecoration: "underline",
+                            cursor: "pointer",
+                            color: "inherit",
+                          }}
+                          onClick={() => setExistingContactsOpen((v) => !v)}
+                        >
+                          {existingContactsOpen
+                            ? "Hide contacts"
+                            : `Show all ${existingContacts.totalContacts} contacts`}
+                        </button>
+                      </div>
+                      {existingContactsOpen && (
+                        <div className="table-wrap" style={{ marginTop: 10, maxHeight: 320, overflowY: "auto" }}>
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Name</th>
+                                <th>Title</th>
+                                <th>Email</th>
+                                <th>Sheet</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {existingContacts.contacts.map((c, i) => (
+                                <tr key={`${c.sheetId}-${c.apolloPersonId || c.email || i}`}>
+                                  <td>
+                                    {c.firstname} {c.lastname}
+                                  </td>
+                                  <td className="small">{c.title}</td>
+                                  <td className="small">{c.email}</td>
+                                  <td className="small muted">{c.sheetName}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ) : existingContacts ? (
@@ -857,13 +955,22 @@ export default function Dashboard() {
                 <div className="label">Passed filter</div>
                 <div className="value">{kept.length}</div>
               </div>
+              <div
+                className="cell"
+                title="People in this result who are already in a saved CSV or Google Sheet — excluded from the pre-tick above"
+              >
+                <div className="label">Already saved</div>
+                <div className="value">
+                  {candidates.filter((c) => c.alreadySourcedIn).length}
+                </div>
+              </div>
               <div className="cell">
                 <div className="label">Selected</div>
                 <div className="value">{selectedCount}</div>
               </div>
               <div className="cell">
                 <div className="label">Estimated credits</div>
-                <div className="value sub">{creditEstimate}</div>
+                <div className="value">{creditEstimate}</div>
               </div>
             </div>
 
@@ -1014,7 +1121,14 @@ export default function Dashboard() {
                         {c.alreadySourcedIn && (
                           <>
                             <br />
-                            <span className="badge warn" title="Already in a saved CSV">
+                            <span
+                              className="badge warn"
+                              title={
+                                c.alreadySourcedInType === "csv"
+                                  ? "Already in a saved CSV"
+                                  : "Already enriched — found in this Google Sheet"
+                              }
+                            >
                               <Check size={11} />
                               in {c.alreadySourcedIn}
                             </span>
@@ -1108,7 +1222,41 @@ export default function Dashboard() {
               <Upload size={15} />
               Push to Sheet
             </button>
+            <button
+              className="secondary"
+              onClick={toggleCreate}
+              disabled={contacts.length === 0}
+              aria-expanded={createOpen}
+            >
+              <Plus size={15} />
+              Create New Sheet
+            </button>
           </div>
+
+          {createOpen && (
+            <div className="row" style={{ marginBottom: 16, alignItems: "flex-end" }}>
+              <div className="field">
+                <label htmlFor="new-sheet-title">Sheet name</label>
+                <input
+                  id="new-sheet-title"
+                  type="text"
+                  value={newSheetTitle}
+                  onChange={(e) => setNewSheetTitle(e.target.value)}
+                  placeholder={selectedOrg?.name || company || "New sheet"}
+                  disabled={creatingSheet}
+                />
+              </div>
+              <button onClick={handleCreateSheet} disabled={creatingSheet}>
+                <Plus size={15} />
+                {creatingSheet ? "Creating…" : "Create"}
+              </button>
+              {createError && (
+                <div className="small" style={{ color: "var(--bad)" }}>
+                  {createError}
+                </div>
+              )}
+            </div>
+          )}
 
           {pushOpen && (
             <div className="row" style={{ marginBottom: 16, alignItems: "flex-end" }}>

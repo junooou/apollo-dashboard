@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getCreditsRemaining, searchPeople } from "@/lib/apollo";
 import { filterAndRank } from "@/lib/filter";
 import { indexExistingContacts } from "@/lib/csv";
+import { findContactsForCompany, normalizeContactName } from "@/lib/sheets";
 import { loadSettings } from "@/lib/settings";
 import { keywordsForDepartments } from "@/lib/taxonomy";
 
@@ -86,11 +87,40 @@ export async function POST(req: Request) {
       );
     }
 
-    // Flag anyone already present in a shipped CSV so we never pay twice.
-    const existing = await indexExistingContacts();
+    // Flag anyone already sourced so we never pay twice. Google Sheets is the
+    // live source of truth — it survives closing/reopening the app, unlike a
+    // local CSV that only exists if this contact was ever exported that way.
+    // Many sheets (hand-built, or pushed before this app tracked
+    // apollo_person_id) have no id column at all, so matching is scoped to
+    // this company's rows and keyed on name — apollo_person_id is used too
+    // when a sheet happens to have it, since it's the more exact match.
+    const folderId = process.env.GOOGLE_PARENT_FOLDER_ID?.trim();
+    const [sheetContacts, csvIndex] = await Promise.all([
+      folderId ? findContactsForCompany(folderId, body.companyName.trim()) : Promise.resolve([]),
+      indexExistingContacts(),
+    ]);
+    const sheetById = new Map(
+      sheetContacts.filter((c) => c.apolloPersonId).map((c) => [c.apolloPersonId, c.sheetName]),
+    );
+    const sheetByName = new Map(
+      sheetContacts
+        .filter((c) => c.firstname && c.lastname)
+        .map((c) => [normalizeContactName(c.firstname, c.lastname), c.sheetName]),
+    );
     for (const candidate of ranked) {
-      const file = existing.get(candidate.apolloPersonId);
-      if (file) candidate.alreadySourcedIn = file;
+      const sheetName =
+        sheetById.get(candidate.apolloPersonId) ??
+        sheetByName.get(normalizeContactName(candidate.firstname, candidate.lastname));
+      if (sheetName) {
+        candidate.alreadySourcedIn = sheetName;
+        candidate.alreadySourcedInType = "sheet";
+        continue;
+      }
+      const file = csvIndex.get(candidate.apolloPersonId);
+      if (file) {
+        candidate.alreadySourcedIn = file;
+        candidate.alreadySourcedInType = "csv";
+      }
     }
 
     return NextResponse.json({

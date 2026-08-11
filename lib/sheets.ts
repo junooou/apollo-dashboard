@@ -71,6 +71,101 @@ export async function listSpreadsheetsInFolder(
   return (res.data.files ?? []).map((f) => ({ id: f.id!, name: f.name! }));
 }
 
+/** Below this length, a substring match is too likely to be noise ("A" would match everything). */
+const MIN_FUZZY_LEN = 3;
+
+/**
+ * Loose company-name equality: exact match, or either name contains the
+ * other. Absorbs drift like "OCBC" vs "OCBC Bank" between what Apollo
+ * resolves and what a human typed into a sheet by hand.
+ */
+function companyNamesMatch(a: string, b: string): boolean {
+  const x = a.trim().toLowerCase();
+  const y = b.trim().toLowerCase();
+  if (!x || !y) return false;
+  return (
+    x === y ||
+    (x.length >= MIN_FUZZY_LEN && y.includes(x)) ||
+    (y.length >= MIN_FUZZY_LEN && x.includes(y))
+  );
+}
+
+/** Normalizes "  Pearl   Low " and "Pearl Low" to the same comparable key. */
+export function normalizeContactName(firstname: string, lastname: string): string {
+  return `${firstname} ${lastname}`.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+export type SheetContact = {
+  firstname: string;
+  lastname: string;
+  title: string;
+  email: string;
+  linkedinUrl: string;
+  apolloPersonId: string;
+  sheetId: string;
+  sheetName: string;
+};
+
+/**
+ * Scans every spreadsheet in `folderId` and returns every row whose company
+ * column fuzzy-matches `companyName` — full contact detail, not just a
+ * count. Many sheets (especially ones built by hand, or pushed before this
+ * app tracked apollo_person_id) have no id column at all, so this matches on
+ * the company column instead — the one column every contact sheet has.
+ */
+export async function findContactsForCompany(
+  folderId: string,
+  companyName: string,
+): Promise<SheetContact[]> {
+  let sheetsList: { id: string; name: string }[];
+  try {
+    sheetsList = await listSpreadsheetsInFolder(folderId);
+  } catch {
+    return [];
+  }
+
+  const perSheet = await Promise.all(
+    sheetsList.map(async (s): Promise<SheetContact[]> => {
+      try {
+        const values = await readRange(s.id, "A1:Z5000");
+        if (values.length < 2) return [];
+
+        const header = values[0].map((h) => (h ?? "").trim().toLowerCase());
+        const companyCol = header.indexOf("company");
+        if (companyCol < 0) return [];
+
+        const firstnameCol = header.indexOf("firstname");
+        const lastnameCol = header.indexOf("lastname");
+        const titleCol = header.indexOf("title");
+        const emailCol = header.indexOf("email");
+        const linkedinCol = header.indexOf("linkedin_url");
+        const idCol = header.indexOf("apollo_person_id");
+
+        const out: SheetContact[] = [];
+        for (const row of values.slice(1)) {
+          const cell = row[companyCol]?.trim() ?? "";
+          if (!cell || !companyNamesMatch(cell, companyName)) continue;
+          out.push({
+            firstname: firstnameCol >= 0 ? (row[firstnameCol] ?? "").trim() : "",
+            lastname: lastnameCol >= 0 ? (row[lastnameCol] ?? "").trim() : "",
+            title: titleCol >= 0 ? (row[titleCol] ?? "").trim() : "",
+            email: emailCol >= 0 ? (row[emailCol] ?? "").trim() : "",
+            linkedinUrl: linkedinCol >= 0 ? (row[linkedinCol] ?? "").trim() : "",
+            apolloPersonId: idCol >= 0 ? (row[idCol] ?? "").trim() : "",
+            sheetId: s.id,
+            sheetName: s.name,
+          });
+        }
+        return out;
+      } catch {
+        return []; // A single unreadable sheet shouldn't fail the whole scan.
+      }
+    }),
+  );
+
+  return perSheet.flat();
+}
+
 /** Appends rows after the last row with data in `range`'s sheet. */
 export async function appendRows(
   spreadsheetId: string,

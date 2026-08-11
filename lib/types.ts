@@ -60,8 +60,10 @@ export type FilterDecision = {
 
 export type ScoredCandidate = Candidate & {
   decision: FilterDecision;
-  /** Set when this person already appears in a shipped CSV. */
+  /** Set when this person already appears in a Google Sheet or a shipped CSV. */
   alreadySourcedIn?: string;
+  /** Which source `alreadySourcedIn` names — a live Google Sheet or a local CSV. */
+  alreadySourcedInType?: "sheet" | "csv";
 };
 
 /** Why a candidate was dropped after enrichment. Drives the issues log. */

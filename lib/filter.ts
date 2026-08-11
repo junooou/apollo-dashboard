@@ -106,6 +106,18 @@ function matchAll(haystack: string, terms: string[]): string[] {
 }
 
 /**
+ * Turns a list of matched keywords into a plain-English clause, e.g.
+ * `"innovation" and "customer service"` instead of a bare quoted list —
+ * readable at a glance in the review table's Why column.
+ */
+function naturalJoin(terms: string[]): string {
+  const quoted = terms.map((t) => `"${t}"`);
+  if (quoted.length <= 1) return quoted[0] ?? "";
+  if (quoted.length === 2) return `${quoted[0]} and ${quoted[1]}`;
+  return `${quoted.slice(0, -1).join(", ")}, and ${quoted[quoted.length - 1]}`;
+}
+
+/**
  * Which departments a title belongs to.
  *
  * Done locally because Apollo's `person_departments` parameter is silently
@@ -169,7 +181,7 @@ export function evaluateCandidate(
     return {
       keep: false,
       score: 0,
-      reason: `Excluded role: matched "${matchedExclude.join('", "')}"`,
+      reason: `Excluded role — title includes ${naturalJoin(matchedExclude)}`,
       matchedInclude,
       matchedExclude,
       matchedNegative,
@@ -184,7 +196,7 @@ export function evaluateCandidate(
     return {
       keep: false,
       score: 0,
-      reason: `Excluded role with no CX qualifier: matched "${matchedConditional.join('", "')}"`,
+      reason: `Excluded — title includes ${naturalJoin(matchedConditional)}, with no CX role to offset it`,
       matchedInclude,
       matchedExclude: [...matchedExclude, ...matchedConditional],
       matchedNegative,
@@ -197,7 +209,7 @@ export function evaluateCandidate(
     return {
       keep: false,
       score: 0,
-      reason: `Negative signal with no CX qualifier: matched "${matchedNegative.join('", "')}"`,
+      reason: `Weak signal — title includes ${naturalJoin(matchedNegative)}, with no CX role to offset it`,
       matchedInclude,
       matchedExclude,
       matchedNegative,
@@ -223,8 +235,8 @@ export function evaluateCandidate(
 
     const reason =
       caveats.length > 0
-        ? `Matched "${matchedInclude.join('", "')}" — kept despite "${caveats.join('", "')}" because a CX qualifier is present`
-        : `Matched "${matchedInclude.join('", "')}"`;
+        ? `Title includes ${naturalJoin(matchedInclude)} — kept despite ${naturalJoin(caveats)} because the role is CX-facing`
+        : `Title includes ${naturalJoin(matchedInclude)}`;
 
     return {
       keep: true,

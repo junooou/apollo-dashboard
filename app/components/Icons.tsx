@@ -47,6 +47,12 @@ export const Close = (p: IconProps) => (
   </Svg>
 );
 
+export const Plus = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 5v14M5 12h14" />
+  </Svg>
+);
+
 export const Search = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="11" cy="11" r="7" />

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   appendRows,
   createSpreadsheet,
+  findContactsForCompany,
   listSpreadsheetsInFolder,
   readRange,
   updateRange,
@@ -13,12 +14,9 @@ import type { EnrichedContact } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** Below this length, a substring match is too likely to be noise ("A" would match everything). */
-const MIN_FUZZY_LEN = 3;
-
 /**
  * GET /api/sheets?list=1                        -> spreadsheets in GOOGLE_PARENT_FOLDER_ID
- * GET /api/sheets?checkCompany=OCBC              -> existing-contact counts by company, across the folder
+ * GET /api/sheets?checkCompany=OCBC              -> existing contacts (full detail) by company, across the folder
  * GET /api/sheets?spreadsheetId=...&range=A1:Z99 -> raw cell values
  */
 export async function GET(req: Request) {
@@ -50,43 +48,20 @@ export async function GET(req: Request) {
         );
       }
 
-      const target = company.toLowerCase();
-      const sheetsList = await listSpreadsheetsInFolder(folderId);
+      const contacts = await findContactsForCompany(folderId, company);
 
-      const results = await Promise.all(
-        sheetsList.map(async (s) => {
-          try {
-            const values = await readRange(s.id, "A1:Z5000");
-            if (values.length < 2) return { sheetId: s.id, sheetName: s.name, count: 0 };
+      const bySheet = new Map<string, { sheetId: string; sheetName: string; count: number }>();
+      for (const c of contacts) {
+        const entry = bySheet.get(c.sheetId);
+        if (entry) entry.count++;
+        else bySheet.set(c.sheetId, { sheetId: c.sheetId, sheetName: c.sheetName, count: 1 });
+      }
 
-            const header = values[0].map((h) => (h ?? "").trim().toLowerCase());
-            const companyCol = header.indexOf("company");
-            if (companyCol < 0) return { sheetId: s.id, sheetName: s.name, count: 0 };
-
-            let count = 0;
-            for (const row of values.slice(1)) {
-              const cell = row[companyCol]?.trim().toLowerCase();
-              if (!cell) continue;
-              // Heuristic: exact match, or either name contains the other, to
-              // absorb drift like "OCBC" vs "OCBC Bank" — guarded by
-              // MIN_FUZZY_LEN so short names can't substring-match everything.
-              const matches =
-                cell === target ||
-                (cell.length >= MIN_FUZZY_LEN && target.includes(cell)) ||
-                (target.length >= MIN_FUZZY_LEN && cell.includes(target));
-              if (matches) count++;
-            }
-            return { sheetId: s.id, sheetName: s.name, count };
-          } catch {
-            // A single unreadable sheet shouldn't fail the whole check.
-            return { sheetId: s.id, sheetName: s.name, count: 0 };
-          }
-        }),
-      );
-
-      const matches = results.filter((r) => r.count > 0);
-      const totalContacts = matches.reduce((sum, r) => sum + r.count, 0);
-      return NextResponse.json({ matches, totalContacts });
+      return NextResponse.json({
+        matches: [...bySheet.values()],
+        totalContacts: contacts.length,
+        contacts,
+      });
     }
 
     const spreadsheetId = searchParams.get("spreadsheetId");

@@ -35,7 +35,6 @@ type CampaignDocument = {
   scope: "company" | "industry";
   sequenceRationale: string;
   emails: CampaignEmail[];
-
   company?: string;
   industry?: string;
 };
@@ -114,10 +113,6 @@ export async function createCampaignDoc(
     );
   }
 
-  /*
-   * Create the Google Doc as a Drive file inside the
-   * configured Shared Drive folder.
-   */
   const createdFile = await drive.files.create({
     supportsAllDrives: true,
 
@@ -142,10 +137,6 @@ export async function createCampaignDoc(
   const documentText =
     buildDocumentText(campaign);
 
-  /*
-   * A blank Google Doc starts with an empty body.
-   * Insert the entire campaign beginning at index 1.
-   */
   await docs.documents.batchUpdate({
     documentId,
 
@@ -169,5 +160,83 @@ export async function createCampaignDoc(
     url:
       createdFile.data.webViewLink ||
       `https://docs.google.com/document/d/${documentId}/edit`,
+  };
+}
+
+export async function updateCampaignDoc(
+  documentId: string,
+  campaign: CampaignDocument,
+) {
+  const auth = getGoogleAuth();
+
+  const drive = google.drive({
+    version: "v3",
+    auth,
+  });
+
+  const docs = google.docs({
+    version: "v1",
+    auth,
+  });
+
+  const currentDocument =
+    await docs.documents.get({
+      documentId,
+    });
+
+  const bodyContent =
+    currentDocument.data.body?.content ?? [];
+
+  const lastElement =
+    bodyContent[bodyContent.length - 1];
+
+  const endIndex =
+    lastElement?.endIndex ?? 1;
+
+  const documentText =
+    buildDocumentText(campaign);
+
+  const requests: any[] = [];
+
+  if (endIndex > 2) {
+    requests.push({
+      deleteContentRange: {
+        range: {
+          startIndex: 1,
+          endIndex: endIndex - 1,
+        },
+      },
+    });
+  }
+
+  requests.push({
+    insertText: {
+      location: {
+        index: 1,
+      },
+      text: documentText,
+    },
+  });
+
+  await docs.documents.batchUpdate({
+    documentId,
+
+    requestBody: {
+      requests,
+    },
+  });
+
+  await drive.files.update({
+    fileId: documentId,
+    supportsAllDrives: true,
+
+    requestBody: {
+      name: campaign.campaignName,
+    },
+  });
+
+  return {
+    documentId,
+    url: `https://docs.google.com/document/d/${documentId}/edit`,
   };
 }

@@ -19,7 +19,6 @@ type GeneratedCampaign = {
 };
 
 export default function OutreachGenerator() {
-
   const editorStyle = {
     width: "100%",
     background: "var(--surface)",
@@ -36,15 +35,19 @@ export default function OutreachGenerator() {
   const [industry, setIndustry] = useState("");
   const [context, setContext] = useState("");
 
-  const [campaign, setCampaign] = useState<GeneratedCampaign | null>(null);
+  const [campaign, setCampaign] =
+    useState<GeneratedCampaign | null>(null);
 
-  const [revisionInstruction, setRevisionInstruction] = useState("");
+  const [revisionInstruction, setRevisionInstruction] =
+    useState("");
 
   const [generating, setGenerating] = useState(false);
   const [revising, setRevising] = useState(false);
 
   const [savingDoc, setSavingDoc] = useState(false);
+  const [docId, setDocId] = useState<string | null>(null);
   const [docUrl, setDocUrl] = useState<string | null>(null);
+  const [docUpdated, setDocUpdated] = useState(false);
   const [docError, setDocError] = useState<string | null>(null);
 
   const [error, setError] = useState<string | null>(null);
@@ -81,14 +84,27 @@ export default function OutreachGenerator() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Template generation failed.");
+        throw new Error(
+          data.error || "Template generation failed.",
+        );
       }
 
       setCampaign(data);
       setRevisionInstruction("");
+
+      /*
+       * This is a completely new campaign, so it should NOT
+       * remain linked to the previous Google Doc.
+       */
+      setDocId(null);
+      setDocUrl(null);
+      setDocUpdated(false);
+      setDocError(null);
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Template generation failed.",
+        err instanceof Error
+          ? err.message
+          : "Template generation failed.",
       );
     } finally {
       setGenerating(false);
@@ -101,7 +117,9 @@ export default function OutreachGenerator() {
     const instruction = revisionInstruction.trim();
 
     if (!instruction) {
-      setError("Tell the generator what you want to change.");
+      setError(
+        "Tell the generator what you want to change.",
+      );
       return;
     }
 
@@ -127,14 +145,22 @@ export default function OutreachGenerator() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Campaign revision failed.");
+        throw new Error(
+          data.error || "Campaign revision failed.",
+        );
       }
 
+      /*
+       * Revision keeps the existing doc relationship.
+       * The next save should update the same Google Doc.
+       */
       setCampaign(data);
       setRevisionInstruction("");
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Campaign revision failed.",
+        err instanceof Error
+          ? err.message
+          : "Campaign revision failed.",
       );
     } finally {
       setRevising(false);
@@ -150,13 +176,14 @@ export default function OutreachGenerator() {
 
     setCampaign({
       ...campaign,
-      emails: campaign.emails.map((email, emailIndex) =>
-        emailIndex === index
-          ? {
-              ...email,
-              [field]: value,
-            }
-          : email,
+      emails: campaign.emails.map(
+        (email, emailIndex) =>
+          emailIndex === index
+            ? {
+                ...email,
+                [field]: value,
+              }
+            : email,
       ),
     });
   }
@@ -187,53 +214,70 @@ export default function OutreachGenerator() {
         (email) =>
           `${email.label}\n${email.topic}\n\nSubject: ${email.subject}\n\n${email.body}`,
       )
-      .join("\n\n------------------------------\n\n");
+      .join(
+        "\n\n------------------------------\n\n",
+      );
 
     await navigator.clipboard.writeText(text);
   }
 
   async function saveToGoogleDoc() {
     if (!campaign) return;
-  
+
     setSavingDoc(true);
     setDocError(null);
-    setDocUrl(null);
-  
+    setDocUpdated(false);
+
     try {
       const response = await fetch("/api/docs", {
         method: "POST",
-  
         headers: {
           "Content-Type": "application/json",
         },
-  
+
         body: JSON.stringify({
+          /*
+           * First save:
+           * docId = null, so API creates a document.
+           *
+           * Later saves:
+           * docId exists, so API updates that same document.
+           */
+          documentId: docId || undefined,
+
           campaignName: campaign.campaignName,
           scope: campaign.scope,
           sequenceRationale:
             campaign.sequenceRationale,
           emails: campaign.emails,
-  
+
           company:
             scope === "company"
               ? company.trim() || undefined
               : undefined,
-  
+
           industry:
             industry.trim() || undefined,
         }),
       });
-  
+
       const data = await response.json();
-  
+
       if (!response.ok) {
         throw new Error(
           data.error ||
             "Failed to save Google Doc.",
         );
       }
-  
+
+      /*
+       * This is the important bit.
+       * Store the ID returned by Google so every later
+       * save updates the same document.
+       */
+      setDocId(data.documentId);
       setDocUrl(data.url);
+      setDocUpdated(Boolean(data.updated));
     } catch (err) {
       setDocError(
         err instanceof Error
@@ -255,10 +299,13 @@ export default function OutreachGenerator() {
       }}
     >
       <div style={{ marginBottom: 20 }}>
-        <h2 style={{ marginBottom: 6 }}>Outreach Generator</h2>
+        <h2 style={{ marginBottom: 6 }}>
+          Outreach Generator
+        </h2>
 
         <div className="small muted">
-          Generate company-specific or reusable industry outreach sequences.
+          Generate company-specific or reusable industry
+          outreach sequences.
         </div>
       </div>
 
@@ -266,35 +313,55 @@ export default function OutreachGenerator() {
         className="row"
         style={{
           alignItems: "flex-end",
-          marginBottom: 16,
+          marginBottom: 20,
+          gap: 16,
+          flexWrap: "wrap",
         }}
       >
         <div className="field">
-          <label htmlFor="outreach-scope">Campaign type</label>
+          <label htmlFor="outreach-scope">
+            Campaign type
+          </label>
 
           <select
             id="outreach-scope"
             value={scope}
             onChange={(event) => {
-              setScope(event.target.value as CampaignScope);
+              setScope(
+                event.target.value as CampaignScope,
+              );
               setCampaign(null);
               setError(null);
+
+              setDocId(null);
+              setDocUrl(null);
+              setDocUpdated(false);
+              setDocError(null);
             }}
             disabled={generating || revising}
           >
-            <option value="industry">Industry-wide</option>
-            <option value="company">Company-specific</option>
+            <option value="industry">
+              Industry-wide
+            </option>
+
+            <option value="company">
+              Company-specific
+            </option>
           </select>
         </div>
 
         {scope === "company" && (
           <div className="field">
-            <label htmlFor="outreach-company">Company</label>
+            <label htmlFor="outreach-company">
+              Company
+            </label>
 
             <input
               id="outreach-company"
               value={company}
-              onChange={(event) => setCompany(event.target.value)}
+              onChange={(event) =>
+                setCompany(event.target.value)
+              }
               placeholder="e.g. OCBC"
               disabled={generating || revising}
               style={{
@@ -307,30 +374,42 @@ export default function OutreachGenerator() {
 
         <div className="field">
           <label htmlFor="outreach-industry">
-            Industry {scope === "company" ? "(optional)" : ""}
+            Industry{" "}
+            {scope === "company"
+              ? "(optional)"
+              : ""}
           </label>
 
           <input
             id="outreach-industry"
             value={industry}
-            onChange={(event) => setIndustry(event.target.value)}
+            onChange={(event) =>
+              setIndustry(event.target.value)
+            }
             placeholder="e.g. banking"
             disabled={generating || revising}
             style={{
-                ...editorStyle,
-                minWidth: 240,
+              ...editorStyle,
+              minWidth: 240,
             }}
           />
         </div>
       </div>
 
-      <div className="field" style={{ marginBottom: 16 }}>
-        <label htmlFor="outreach-context">Additional context</label>
+      <div
+        className="field"
+        style={{ marginBottom: 16 }}
+      >
+        <label htmlFor="outreach-context">
+          Additional context
+        </label>
 
         <textarea
           id="outreach-context"
           value={context}
-          onChange={(event) => setContext(event.target.value)}
+          onChange={(event) =>
+            setContext(event.target.value)
+          }
           placeholder={
             scope === "company"
               ? "Anything useful about the company, their current CX setup, AI initiatives, competitors, pain points, or who you are targeting..."
@@ -339,37 +418,41 @@ export default function OutreachGenerator() {
           rows={5}
           disabled={generating || revising}
           style={{
-            width: "100%",
+            ...editorStyle,
             resize: "vertical",
+            minHeight: 140,
           }}
         />
       </div>
 
-      <button onClick={generateCampaign} disabled={generating || revising}>
+      <button
+        onClick={generateCampaign}
+        disabled={generating || revising}
+      >
         {generating ? (
-            <>
+          <>
             <span className="spinner" />
             Generating outreach…
-            </>
+          </>
         ) : campaign ? (
-            "Generate New Sequence"
+          "Generate New Sequence"
         ) : (
-            "Generate Sequence"
+          "Generate Sequence"
         )}
       </button>
 
       {generating && (
         <div
-            className="small muted"
-            style={{
+          className="small muted"
+          style={{
             marginTop: 10,
             display: "flex",
             alignItems: "center",
             gap: 8,
-            }}
+          }}
         >
-            Reading outreach guidelines and building your sequence. This can take around
-            15–30 seconds.
+          Reading outreach guidelines and building your
+          sequence. This can take around 15–30 seconds.
         </div>
       )}
 
@@ -389,22 +472,32 @@ export default function OutreachGenerator() {
         <div style={{ marginTop: 28 }}>
           <hr style={{ marginBottom: 24 }} />
 
-          <div className="field" style={{ marginBottom: 18 }}>
+          <div
+            className="field"
+            style={{ marginBottom: 18 }}
+          >
             <label>Campaign name</label>
 
             <input
               value={campaign.campaignName}
-              onChange={(event) => updateCampaignName(event.target.value)}
+              onChange={(event) =>
+                updateCampaignName(event.target.value)
+              }
               style={editorStyle}
             />
           </div>
 
-          <div className="field" style={{ marginBottom: 24 }}>
+          <div
+            className="field"
+            style={{ marginBottom: 24 }}
+          >
             <label>Sequence rationale</label>
 
             <textarea
               value={campaign.sequenceRationale}
-              onChange={(event) => updateRationale(event.target.value)}
+              onChange={(event) =>
+                updateRationale(event.target.value)
+              }
               rows={4}
               style={{
                 ...editorStyle,
@@ -420,69 +513,97 @@ export default function OutreachGenerator() {
               gap: 18,
             }}
           >
-            {campaign.emails.map((email, index) => (
-              <div
-                key={`${email.label}-${index}`}
-                style={{
-                  border: "1px solid var(--border)",
-                  borderRadius: 10,
-                  padding: 16,
-                }}
-              >
-                <div className="field" style={{ marginBottom: 12 }}>
-                  <label>Email label</label>
+            {campaign.emails.map(
+              (email, index) => (
+                <div
+                  key={`${email.label}-${index}`}
+                  style={{
+                    border:
+                      "1px solid var(--border)",
+                    borderRadius: 10,
+                    padding: 16,
+                  }}
+                >
+                  <div
+                    className="field"
+                    style={{ marginBottom: 12 }}
+                  >
+                    <label>Email label</label>
 
-                  <input
-                    value={email.label}
-                    onChange={(event) =>
-                      updateEmail(index, "label", event.target.value)
-                    }
-                    style={editorStyle}
-                  />
-                </div>
+                    <input
+                      value={email.label}
+                      onChange={(event) =>
+                        updateEmail(
+                          index,
+                          "label",
+                          event.target.value,
+                        )
+                      }
+                      style={editorStyle}
+                    />
+                  </div>
 
-                <div className="field" style={{ marginBottom: 12 }}>
-                  <label>Topic</label>
+                  <div
+                    className="field"
+                    style={{ marginBottom: 12 }}
+                  >
+                    <label>Topic</label>
 
-                  <input
-                    value={email.topic}
-                    onChange={(event) =>
-                      updateEmail(index, "topic", event.target.value)
-                    }
-                    style={editorStyle}
-                  />
-                </div>
+                    <input
+                      value={email.topic}
+                      onChange={(event) =>
+                        updateEmail(
+                          index,
+                          "topic",
+                          event.target.value,
+                        )
+                      }
+                      style={editorStyle}
+                    />
+                  </div>
 
-                <div className="field" style={{ marginBottom: 12 }}>
-                  <label>Subject</label>
+                  <div
+                    className="field"
+                    style={{ marginBottom: 12 }}
+                  >
+                    <label>Subject</label>
 
-                  <input
-                    value={email.subject}
-                    onChange={(event) =>
-                      updateEmail(index, "subject", event.target.value)
-                    }
-                    style={editorStyle}
-                  />
-                </div>
+                    <input
+                      value={email.subject}
+                      onChange={(event) =>
+                        updateEmail(
+                          index,
+                          "subject",
+                          event.target.value,
+                        )
+                      }
+                      style={editorStyle}
+                    />
+                  </div>
 
-                <div className="field">
-                  <label>Body</label>
+                  <div className="field">
+                    <label>Body</label>
 
-                  <textarea
-                    value={email.body}
-                    onChange={(event) =>
-                      updateEmail(index, "body", event.target.value)
-                    }
-                    rows={8}
-                    style={{
+                    <textarea
+                      value={email.body}
+                      onChange={(event) =>
+                        updateEmail(
+                          index,
+                          "body",
+                          event.target.value,
+                        )
+                      }
+                      rows={8}
+                      style={{
                         ...editorStyle,
                         resize: "vertical",
                         lineHeight: 1.5,
-                    }}
-                  />
+                      }}
+                    />
+                  </div>
                 </div>
-              </div>
-            ))}
+              ),
+            )}
           </div>
 
           <div
@@ -493,24 +614,30 @@ export default function OutreachGenerator() {
               borderRadius: 10,
             }}
           >
-            <h3 style={{ marginTop: 0, marginBottom: 6 }}>
+            <h3
+              style={{
+                marginTop: 0,
+                marginBottom: 6,
+              }}
+            >
               Ask AI to revise this sequence
             </h3>
 
             <div
               className="small muted"
-              style={{
-                marginBottom: 12,
-              }}
+              style={{ marginBottom: 12 }}
             >
-              Tell it exactly what to change. Everything else should stay as
-              close to the current version as possible.
+              Tell it exactly what to change.
+              Everything else should stay as close to the
+              current version as possible.
             </div>
 
             <textarea
               value={revisionInstruction}
               onChange={(event) =>
-                setRevisionInstruction(event.target.value)
+                setRevisionInstruction(
+                  event.target.value,
+                )
               }
               placeholder="e.g. Make the main email more competitor-aware. Keep all other emails the same."
               rows={4}
@@ -527,6 +654,7 @@ export default function OutreachGenerator() {
               style={{
                 alignItems: "center",
                 gap: 10,
+                flexWrap: "wrap",
               }}
             >
               <button
@@ -537,7 +665,9 @@ export default function OutreachGenerator() {
                   !revisionInstruction.trim()
                 }
               >
-                {revising ? "Applying Changes…" : "Apply Changes"}
+                {revising
+                  ? "Applying Changes…"
+                  : "Apply Changes"}
               </button>
 
               <button
@@ -552,49 +682,54 @@ export default function OutreachGenerator() {
                 type="button"
                 onClick={saveToGoogleDoc}
                 disabled={
-                    revising ||
-                    generating ||
-                    savingDoc
+                  revising ||
+                  generating ||
+                  savingDoc
                 }
-                >
+              >
                 {savingDoc ? (
-                    <>
+                  <>
                     <span className="spinner" />
-                    Saving…
-                    </>
+                    {docId
+                      ? "Updating…"
+                      : "Saving…"}
+                  </>
+                ) : docId ? (
+                  "Update Google Doc"
                 ) : (
-                    "Save to Google Doc"
+                  "Save to Google Doc"
                 )}
               </button>
-
-              {docUrl && (
-                <div
-                    className="notice info"
-                    style={{ marginTop: 14 }}
-                >
-                    <div>
-                    Google Doc created successfully.{" "}
-                    <a
-                        href={docUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                    >
-                        Open Google Doc
-                    </a>
-                    </div>
-                </div>
-              )}
-
-              {docError && (
-                <div
-                  className="notice error"
-                  style={{ marginTop: 14 }}
-                >
-                  {docError}
-                </div>
-              )}
-
             </div>
+
+            {docUrl && (
+              <div
+                className="notice info"
+                style={{ marginTop: 14 }}
+              >
+                <div>
+                  {docUpdated
+                    ? "Google Doc updated successfully."
+                    : "Google Doc created successfully."}{" "}
+                  <a
+                    href={docUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open Google Doc
+                  </a>
+                </div>
+              </div>
+            )}
+
+            {docError && (
+              <div
+                className="notice error"
+                style={{ marginTop: 14 }}
+              >
+                <div>{docError}</div>
+              </div>
+            )}
           </div>
         </div>
       )}

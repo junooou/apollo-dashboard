@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
-import { createCampaignDoc } from "@/lib/docs";
+import {
+    createCampaignDoc,
+    updateCampaignDoc,
+  } from "@/lib/docs";
 
 type CampaignEmail = {
   label: string;
@@ -9,6 +12,7 @@ type CampaignEmail = {
 };
 
 type SaveCampaignRequest = {
+  documentId?: string;
   campaignName: string;
   scope: "company" | "industry";
   sequenceRationale: string;
@@ -49,12 +53,26 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = await createCampaignDoc({
-      ...body,
-      campaignName: body.campaignName.trim(),
-    });
-
-    return NextResponse.json(result);
+    const campaign = {
+        campaignName: body.campaignName.trim(),
+        scope: body.scope,
+        sequenceRationale: body.sequenceRationale,
+        emails: body.emails,
+        company: body.company,
+        industry: body.industry,
+      };
+      
+      const result = body.documentId
+        ? await updateCampaignDoc(
+            body.documentId,
+            campaign,
+          )
+        : await createCampaignDoc(campaign);
+      
+      return NextResponse.json({
+        ...result,
+        updated: Boolean(body.documentId),
+      });
   } catch (error) {
     console.error(
       "Google Doc creation failed:",

@@ -92,15 +92,21 @@ export default function Dashboard() {
   const [hasKey, setHasKey] = useState<boolean>(true);
   const [savedTo, setSavedTo] = useState<string | null>(null);
 
-  // Push to Sheet — lists spreadsheets from GOOGLE_PARENT_FOLDER_ID, appends
-  // (never overwrites) the current run's contacts to whichever one is picked.
+  // Google Sheets export.
+  // Users can either append the current contacts to an existing spreadsheet
+  // or create a brand-new spreadsheet and push the contacts into it immediately.
   const [pushOpen, setPushOpen] = useState(false);
   const [sheets, setSheets] = useState<{ id: string; name: string }[]>([]);
   const [sheetsLoading, setSheetsLoading] = useState(false);
   const [sheetsError, setSheetsError] = useState<string | null>(null);
+
+  const [sheetMode, setSheetMode] = useState<"existing" | "create">("existing");
   const [selectedSheetId, setSelectedSheetId] = useState("");
+  const [newSheetName, setNewSheetName] = useState("");
+
   const [pushing, setPushing] = useState(false);
   const [pushResult, setPushResult] = useState<string | null>(null);
+  const [createdSheetUrl, setCreatedSheetUrl] = useState<string | null>(null);
 
   // Create New Sheet — creates a spreadsheet inside GOOGLE_PARENT_FOLDER_ID
   // and adds it to the Push to Sheet picker, selected and ready to push to.
@@ -417,6 +423,7 @@ export default function Dashboard() {
     const next = !pushOpen;
     setPushOpen(next);
     setPushResult(null);
+    setCreatedSheetUrl(null);
     if (next && sheets.length === 0 && !sheetsLoading) {
       setSheetsLoading(true);
       setSheetsError(null);
@@ -435,21 +442,69 @@ export default function Dashboard() {
   }
 
   async function handlePushToSheet() {
-    if (!selectedSheetId) return;
     setPushing(true);
     setPushResult(null);
+    setCreatedSheetUrl(null);
+  
     try {
-      const data = await post<{ rowsPushed: number; headerAdded: boolean }>("/api/sheets", {
+      let spreadsheetId = selectedSheetId;
+      let sheetName =
+        sheets.find((sheet) => sheet.id === selectedSheetId)?.name ?? "Google Sheet";
+  
+      // Create a brand-new spreadsheet first if the user selected create mode.
+      if (sheetMode === "create") {
+        const title = newSheetName.trim();
+  
+        if (!title) {
+          throw new Error("Enter a name for the new Google Sheet.");
+        }
+  
+        const created = await post<{
+          spreadsheetId: string;
+          url: string;
+        }>("/api/sheets", {
+          mode: "create",
+          title,
+          sheetTitles: ["Contacts"],
+        });
+  
+        spreadsheetId = created.spreadsheetId;
+        sheetName = title;
+        setCreatedSheetUrl(created.url);
+  
+        // Add the newly created sheet to the existing-sheet picker as well.
+        setSheets((current) => [
+          { id: created.spreadsheetId, name: title },
+          ...current.filter((sheet) => sheet.id !== created.spreadsheetId),
+        ]);
+  
+        setSelectedSheetId(created.spreadsheetId);
+      }
+  
+      if (!spreadsheetId) {
+        throw new Error("Choose a Google Sheet first.");
+      }
+  
+      const data = await post<{
+        rowsPushed: number;
+        headerAdded: boolean;
+      }>("/api/sheets", {
         mode: "pushContacts",
-        spreadsheetId: selectedSheetId,
+        spreadsheetId,
         contacts,
       });
-      const sheetName = sheets.find((s) => s.id === selectedSheetId)?.name ?? "sheet";
+  
       setPushResult(
-        `Added ${data.rowsPushed} row${data.rowsPushed === 1 ? "" : "s"} to "${sheetName}".`,
+        `${sheetMode === "create" ? "Created" : "Updated"} "${sheetName}" and added ${
+          data.rowsPushed
+        } row${data.rowsPushed === 1 ? "" : "s"}.`,
       );
+  
+      if (sheetMode === "create") {
+        setNewSheetName("");
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Push to Sheet failed");
+      setError(err instanceof Error ? err.message : "Google Sheets export failed");
     } finally {
       setPushing(false);
     }
@@ -1259,41 +1314,106 @@ export default function Dashboard() {
           )}
 
           {pushOpen && (
-            <div className="row" style={{ marginBottom: 16, alignItems: "flex-end" }}>
-              <div className="field">
-                <label htmlFor="push-sheet">Sheet</label>
-                {sheetsLoading ? (
-                  <div className="small muted">Loading sheets…</div>
-                ) : sheetsError ? (
-                  <div className="small" style={{ color: "var(--bad)" }}>
-                    {sheetsError}
-                  </div>
-                ) : sheets.length === 0 ? (
-                  <div className="small muted">
-                    No sheets found in the configured Drive folder.
-                  </div>
-                ) : (
+            <div style={{ marginBottom: 16 }}>
+              <div
+                className="row"
+                style={{
+                  marginBottom: 12,
+                  alignItems: "flex-end",
+                }}
+              >
+                <div className="field">
+                  <label htmlFor="sheet-mode">Destination</label>
+
                   <select
-                    id="push-sheet"
-                    value={selectedSheetId}
-                    onChange={(e) => setSelectedSheetId(e.target.value)}
+                    id="sheet-mode"
+                    value={sheetMode}
+                    onChange={(e) =>
+                      setSheetMode(e.target.value as "existing" | "create")
+                    }
                     disabled={pushing}
                   >
-                    {sheets.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name}
-                      </option>
-                    ))}
+                    <option value="existing">Existing Google Sheet</option>
+                    <option value="create">Create new Google Sheet</option>
                   </select>
+                </div>
+
+                {sheetMode === "existing" ? (
+                  <div className="field">
+                    <label htmlFor="push-sheet">Google Sheet</label>
+
+                    {sheetsLoading ? (
+                      <div className="small muted">Loading sheets…</div>
+                    ) : sheetsError ? (
+                      <div className="small" style={{ color: "var(--bad)" }}>
+                        {sheetsError}
+                      </div>
+                    ) : sheets.length === 0 ? (
+                      <div className="small muted">
+                        No existing sheets found. Create a new one instead.
+                      </div>
+                    ) : (
+                      <select
+                        id="push-sheet"
+                        value={selectedSheetId}
+                        onChange={(e) => setSelectedSheetId(e.target.value)}
+                        disabled={pushing}
+                      >
+                        {sheets.map((sheet) => (
+                          <option key={sheet.id} value={sheet.id}>
+                            {sheet.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                ) : (
+                  <div className="field">
+                    <label htmlFor="new-sheet-name">New sheet name</label>
+
+                    <input
+                      id="new-sheet-name"
+                      type="text"
+                      value={newSheetName}
+                      onChange={(e) => setNewSheetName(e.target.value)}
+                      placeholder={
+                        selectedOrg?.name
+                          ? `${selectedOrg.name} Leads`
+                          : "Apollo Leads"
+                      }
+                      disabled={pushing}
+                    />
+                  </div>
                 )}
+
+                <button
+                  onClick={handlePushToSheet}
+                  disabled={
+                    pushing ||
+                    contacts.length === 0 ||
+                    (sheetMode === "existing" &&
+                      (!selectedSheetId || sheets.length === 0)) ||
+                    (sheetMode === "create" && !newSheetName.trim())
+                  }
+                >
+                  <Upload size={15} />
+
+                  {pushing
+                    ? sheetMode === "create"
+                      ? "Creating…"
+                      : "Pushing…"
+                    : sheetMode === "create"
+                      ? "Create & Push"
+                      : "Push"}
+                </button>
               </div>
-              <button
-                onClick={handlePushToSheet}
-                disabled={pushing || !selectedSheetId || sheets.length === 0}
-              >
-                <Upload size={15} />
-                {pushing ? "Pushing…" : "Push"}
-              </button>
+
+              {sheetMode === "create" && (
+                <div className="small muted">
+                  The spreadsheet will be created in the configured Google Shared Drive
+                  folder.
+                </div>
+              )}
             </div>
           )}
 
@@ -1301,6 +1421,21 @@ export default function Dashboard() {
             <div className="notice info">
               <Check size={16} />
               <div>{pushResult}</div>
+            </div>
+          )}
+
+          {createdSheetUrl && (
+            <div className="notice info">
+              <Check size={16} />
+              <div>
+                <a
+                  href={createdSheetUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open Google Sheet
+                </a>
+              </div>
             </div>
           )}
 

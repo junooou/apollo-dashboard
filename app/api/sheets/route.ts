@@ -88,7 +88,6 @@ type SheetsRequestBody = {
   title?: string;
   sheetTitles?: string[];
   shareWithEmail?: string;
-  parentFolderId?: string;
   contacts?: EnrichedContact[];
 };
 
@@ -105,13 +104,37 @@ export async function POST(req: Request) {
     const body = (await req.json()) as SheetsRequestBody;
 
     if (body.mode === "create") {
-      if (!body.title) {
-        return NextResponse.json({ error: "title is required" }, { status: 400 });
+      const title = body.title?.trim();
+    
+      if (!title) {
+        return NextResponse.json(
+          { error: "title is required" },
+          { status: 400 },
+        );
       }
-      const result = await createSpreadsheet(body.title, body.sheetTitles, {
-        shareWithEmail: body.shareWithEmail,
-        parentFolderId: body.parentFolderId,
-      });
+    
+      const parentFolderId =
+        process.env.GOOGLE_PARENT_FOLDER_ID?.trim();
+    
+      if (!parentFolderId) {
+        return NextResponse.json(
+          {
+            error:
+              "GOOGLE_PARENT_FOLDER_ID is not set in .env.local",
+          },
+          { status: 400 },
+        );
+      }
+    
+      const result = await createSpreadsheet(
+        title,
+        body.sheetTitles,
+        {
+          shareWithEmail: body.shareWithEmail,
+          parentFolderId,
+        },
+      );
+    
       return NextResponse.json(result);
     }
 

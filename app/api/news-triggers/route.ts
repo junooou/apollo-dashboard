@@ -3,6 +3,10 @@ import fs from "fs/promises";
 import path from "path";
 
 import {
+  sendNewsTriggerAlert,
+} from "@/lib/news-alert-email";
+
+import {
   fetchNewsTriggerCandidates,
   type NewsTriggerArticle,
 } from "@/lib/currents";
@@ -12,329 +16,671 @@ import {
   type ScoredNewsTrigger,
 } from "@/lib/news-scoring";
 
-const CANDIDATES_CACHE_PATH = path.join(
+const HISTORY_PATH = path.join(
   process.cwd(),
   "data",
-  "news-candidates.json",
+  "news-history.json",
 );
 
-const SCORED_CACHE_PATH = path.join(
+const LEGACY_SCORED_CACHE_PATH = path.join(
   process.cwd(),
   "data",
   "news-scored.json",
 );
 
-type CachedCandidates = {
-  fetchedAt: string;
-  articles: NewsTriggerArticle[];
+type NewsHistoryEntry = {
+  article: NewsTriggerArticle;
+  score: ScoredNewsTrigger;
+
+  firstSeenAt: string;
+  lastSeenAt: string;
+
+  alertSentAt: string | null;
+};
+
+type NewsHistory = {
+  lastRefreshAt: string | null;
+  entries: NewsHistoryEntry[];
 };
 
 type NewsTriggerResult = NewsTriggerArticle & {
   score: ScoredNewsTrigger;
+
+  firstSeenAt: string;
+  lastSeenAt: string;
+
+  isNew: boolean;
 };
 
-type CachedScoredNews = {
-  fetchedAt: string;
-  scoredAt: string;
-  results: NewsTriggerResult[];
+type LegacyScoredCache = {
+  fetchedAt?: string;
+  scoredAt?: string;
+
+  results?: Array<
+    NewsTriggerArticle & {
+      score: ScoredNewsTrigger;
+    }
+  >;
 };
 
-async function readCandidatesCache(): Promise<CachedCandidates | null> {
+function emptyHistory(): NewsHistory {
+  return {
+    lastRefreshAt: null,
+    entries: [],
+  };
+}
+
+function normalizeUrl(value: string) {
+  try {
+    const url = new URL(value);
+
+    url.hash = "";
+
+    // Tracking/query parameters should not make
+    // the same article look new.
+    url.search = "";
+
+    return url
+      .toString()
+      .replace(/\/$/, "")
+      .toLowerCase();
+  } catch {
+    return value
+      .trim()
+      .replace(/\/$/, "")
+      .toLowerCase();
+  }
+}
+
+function articleKey(article: NewsTriggerArticle) {
+  if (article.url) {
+    return `url:${normalizeUrl(article.url)}`;
+  }
+
+  return `id:${article.id}`;
+}
+
+async function readHistory(): Promise<NewsHistory> {
   try {
     const raw = await fs.readFile(
-      CANDIDATES_CACHE_PATH,
+      HISTORY_PATH,
       "utf8",
     );
 
     const parsed = JSON.parse(raw);
 
-    if (Array.isArray(parsed)) {
-      return null;
+    if (
+      !parsed ||
+      !Array.isArray(parsed.entries)
+    ) {
+      return emptyHistory();
     }
 
-    return parsed as CachedCandidates;
+    return parsed as NewsHistory;
   } catch {
-    return null;
+    return emptyHistory();
   }
 }
 
-async function writeCandidatesCache(
-  articles: NewsTriggerArticle[],
-): Promise<CachedCandidates> {
+async function writeHistory(
+  history: NewsHistory,
+) {
   await fs.mkdir(
-    path.dirname(CANDIDATES_CACHE_PATH),
+    path.dirname(HISTORY_PATH),
     {
       recursive: true,
     },
   );
 
-  const cache: CachedCandidates = {
-    fetchedAt: new Date().toISOString(),
-    articles,
-  };
-
   await fs.writeFile(
-    CANDIDATES_CACHE_PATH,
-    JSON.stringify(cache, null, 2),
+    HISTORY_PATH,
+    JSON.stringify(
+      history,
+      null,
+      2,
+    ),
     "utf8",
   );
-
-  return cache;
 }
 
-async function readScoredCache(): Promise<CachedScoredNews | null> {
+async function migrateLegacyScoredCache(
+  history: NewsHistory,
+): Promise<NewsHistory> {
+  // Only migrate once.
+  if (history.entries.length > 0) {
+    return history;
+  }
+
   try {
     const raw = await fs.readFile(
-      SCORED_CACHE_PATH,
+      LEGACY_SCORED_CACHE_PATH,
       "utf8",
     );
 
-    const parsed = JSON.parse(raw);
+    const parsed =
+      JSON.parse(raw) as LegacyScoredCache;
 
-    if (Array.isArray(parsed)) {
-      return null;
+    if (
+      !parsed ||
+      !Array.isArray(parsed.results) ||
+      parsed.results.length === 0
+    ) {
+      return history;
     }
 
-    return parsed as CachedScoredNews;
+    const migratedAt =
+      parsed.scoredAt ||
+      parsed.fetchedAt ||
+      new Date().toISOString();
+
+    const migrated: NewsHistory = {
+      lastRefreshAt: null,
+
+      entries: parsed.results.map(
+        (result) => {
+          const {
+            score,
+            ...article
+          } = result;
+
+          return {
+            article,
+            score,
+
+            firstSeenAt:
+              migratedAt,
+
+            lastSeenAt:
+              migratedAt,
+
+            alertSentAt:
+              null,
+          };
+        },
+      ),
+    };
+
+    await writeHistory(
+      migrated,
+    );
+
+    console.log(
+      `Migrated ${migrated.entries.length} scored articles into news history.`,
+    );
+
+    return migrated;
   } catch {
-    return null;
+    return history;
   }
 }
 
-async function writeScoredCache(
-  fetchedAt: string,
-  results: NewsTriggerResult[],
-): Promise<CachedScoredNews> {
-  await fs.mkdir(
-    path.dirname(SCORED_CACHE_PATH),
-    {
-      recursive: true,
-    },
-  );
-
-  const cache: CachedScoredNews = {
-    fetchedAt,
-    scoredAt: new Date().toISOString(),
-    results,
-  };
-
-  await fs.writeFile(
-    SCORED_CACHE_PATH,
-    JSON.stringify(cache, null, 2),
-    "utf8",
-  );
-
-  return cache;
-}
-
-async function scoreArticles(
-  candidates: CachedCandidates,
-): Promise<CachedScoredNews> {
-  const scores =
-    await scoreNewsTriggers(
-      candidates.articles,
-    );
-
-  const scoresById = new Map(
-    scores.map((score) => [
-      score.articleId,
-      score,
-    ]),
-  );
+function buildResponse(
+  history: NewsHistory,
+  fetchedThisRefresh = 0,
+  scoredThisRefresh = 0,
+) {
+  const latestRefreshAt =
+    history.lastRefreshAt;
 
   const results: NewsTriggerResult[] =
-    candidates.articles
-      .map((article) => {
-        const score =
-          scoresById.get(article.id);
+    history.entries.map(
+      (entry) => ({
+        ...entry.article,
 
-        if (!score) {
-          return null;
+        score:
+          entry.score,
+
+        firstSeenAt:
+          entry.firstSeenAt,
+
+        lastSeenAt:
+          entry.lastSeenAt,
+
+        isNew:
+          Boolean(
+            latestRefreshAt,
+          ) &&
+          entry.firstSeenAt ===
+            latestRefreshAt,
+      }),
+    );
+
+  const opportunities =
+    results
+      .filter(
+        (item) =>
+          item.score
+            .relevanceScore >= 70,
+      )
+      .sort((a, b) => {
+        if (
+          a.isNew !== b.isNew
+        ) {
+          return a.isNew
+            ? -1
+            : 1;
         }
 
-        return {
-          ...article,
-          score,
-        };
-      })
+        return (
+          b.score
+            .relevanceScore -
+          a.score
+            .relevanceScore
+        );
+      });
+
+  const ignored =
+    results
       .filter(
-        (
-          item,
-        ): item is NewsTriggerResult =>
-          item !== null,
+        (item) =>
+          item.score
+            .relevanceScore < 70,
+      )
+      .sort(
+        (a, b) =>
+          new Date(
+            b.firstSeenAt,
+          ).getTime() -
+          new Date(
+            a.firstSeenAt,
+          ).getTime(),
       );
 
-  results.sort(
-    (a, b) =>
-      b.score.relevanceScore -
-      a.score.relevanceScore,
+  const newArticles =
+    results.filter(
+      (item) =>
+        item.isNew,
+    );
+
+  const newOpportunities =
+    newArticles.filter(
+      (item) =>
+        item.score
+          .relevanceScore >= 70,
+    );
+
+  return {
+    opportunities,
+
+    counts: {
+      fetched:
+        fetchedThisRefresh,
+
+      scored:
+        results.length,
+
+      opportunities:
+        opportunities.length,
+
+      ignored:
+        ignored.length,
+
+      newArticles:
+        newArticles.length,
+
+      newOpportunities:
+        newOpportunities.length,
+
+      scoredThisRefresh,
+    },
+
+    ignored,
+
+    cache: {
+      fetchedAt:
+        history.lastRefreshAt,
+
+      scoredAt:
+        history.lastRefreshAt,
+
+      source:
+        "history",
+
+      lastRefreshAt:
+        history.lastRefreshAt,
+    },
+  };
+}
+
+async function refreshNews(
+  history: NewsHistory,
+) {
+  const refreshAt =
+    new Date().toISOString();
+
+  const freshArticles =
+    await fetchNewsTriggerCandidates();
+
+  console.log(
+    `Currents returned ${freshArticles.length} trusted articles.`,
   );
 
-  return writeScoredCache(
-    candidates.fetchedAt,
-    results,
+  const existingByKey =
+    new Map<
+      string,
+      NewsHistoryEntry
+    >();
+
+  for (
+    const entry
+    of history.entries
+  ) {
+    existingByKey.set(
+      articleKey(
+        entry.article,
+      ),
+      entry,
+    );
+  }
+
+  const newArticles:
+    NewsTriggerArticle[] = [];
+
+  for (
+    const article
+    of freshArticles
+  ) {
+    const key =
+      articleKey(article);
+
+    const existing =
+      existingByKey.get(
+        key,
+      );
+
+    if (existing) {
+      /*
+       * IMPORTANT:
+       * Preserve the ORIGINAL score.
+       *
+       * The same article should not be
+       * sent to OpenAI every day and
+       * randomly move from 92 → 88 etc.
+       */
+      existing.article = {
+        ...existing.article,
+        ...article,
+      };
+
+      existing.lastSeenAt =
+        refreshAt;
+
+      continue;
+    }
+
+    newArticles.push(
+      article,
+    );
+  }
+
+  console.log(
+    `${newArticles.length} genuinely new article${
+      newArticles.length === 1
+        ? ""
+        : "s"
+    } found.`,
   );
+
+  /*
+   * Score ONLY genuinely new articles.
+   */
+  if (
+    newArticles.length > 0
+  ) {
+    console.log(
+      "Scoring new articles with OpenAI...",
+    );
+
+    const scores =
+      await scoreNewsTriggers(
+        newArticles,
+      );
+
+    const scoreById =
+      new Map(
+        scores.map(
+          (score) => [
+            score.articleId,
+            score,
+          ],
+        ),
+      );
+
+    for (
+      const article
+      of newArticles
+    ) {
+      const score =
+        scoreById.get(
+          article.id,
+        );
+
+      if (!score) {
+        console.warn(
+          `No OpenAI score returned for article ${article.id}`,
+        );
+
+        continue;
+      }
+
+      const entry:
+        NewsHistoryEntry = {
+          article,
+          score,
+
+          firstSeenAt:
+            refreshAt,
+
+          lastSeenAt:
+            refreshAt,
+
+          alertSentAt:
+            null,
+        };
+
+      history.entries.push(
+        entry,
+      );
+
+      existingByKey.set(
+        articleKey(
+          article,
+        ),
+        entry,
+      );
+    }
+  }
+
+  /*
+   * Find ONLY:
+   *
+   * - articles discovered in THIS refresh
+   * - score >= 70
+   * - never emailed before
+   */
+  const newActionableEntries =
+    history.entries.filter(
+      (entry) =>
+        entry.firstSeenAt ===
+          refreshAt &&
+        entry.score
+          .relevanceScore >= 70 &&
+        entry.alertSentAt ===
+          null,
+    );
+
+  /*
+   * Send ONE digest email containing
+   * all new actionable articles.
+   *
+   * If there are no new >=70 articles,
+   * no email is sent.
+   */
+  if (
+    newActionableEntries.length >
+    0
+  ) {
+    console.log(
+      `Sending email alert for ${newActionableEntries.length} new opportunity${
+        newActionableEntries.length ===
+        1
+          ? ""
+          : "ies"
+      }...`,
+    );
+
+    try {
+      await sendNewsTriggerAlert(
+        newActionableEntries.map(
+          (entry) => ({
+            ...entry.article,
+            score:
+              entry.score,
+          }),
+        ),
+      );
+
+      /*
+       * Only mark an alert as sent
+       * AFTER Resend succeeds.
+       */
+      const sentAt =
+        new Date().toISOString();
+
+      for (
+        const entry
+        of newActionableEntries
+      ) {
+        entry.alertSentAt =
+          sentAt;
+      }
+
+      console.log(
+        "News alert email sent successfully.",
+      );
+    } catch (error) {
+      /*
+       * IMPORTANT:
+       *
+       * If the email fails, leave
+       * alertSentAt = null.
+       *
+       * We don't want a failed email
+       * to permanently suppress the alert.
+       */
+      console.error(
+        "News alert email failed:",
+        error,
+      );
+    }
+  } else {
+    console.log(
+      "No new actionable articles. No email alert needed.",
+    );
+  }
+
+  history.lastRefreshAt =
+    refreshAt;
+
+  /*
+   * Keep newest discoveries first
+   * inside news-history.json.
+   */
+  history.entries.sort(
+    (a, b) =>
+      new Date(
+        b.firstSeenAt,
+      ).getTime() -
+      new Date(
+        a.firstSeenAt,
+      ).getTime(),
+  );
+
+  /*
+   * Save EVERYTHING:
+   *
+   * - old history
+   * - new articles
+   * - stable scores
+   * - lastSeenAt
+   * - alertSentAt
+   */
+  await writeHistory(
+    history,
+  );
+
+  return {
+    history,
+
+    fetchedThisRefresh:
+      freshArticles.length,
+
+    scoredThisRefresh:
+      newArticles.length,
+  };
 }
 
 export async function GET(
   request: NextRequest,
 ) {
   try {
-    /*
-     * refresh=1
-     *
-     * Fetch NEW articles from Currents
-     * AND rescore them with OpenAI.
-     *
-     * This costs Currents + OpenAI requests.
-     */
     const shouldRefresh =
-      request.nextUrl.searchParams.get(
-        "refresh",
-      ) === "1";
+      request.nextUrl
+        .searchParams
+        .get(
+          "refresh",
+        ) === "1";
+
+    let history =
+      await readHistory();
+
+    history =
+      await migrateLegacyScoredCache(
+        history,
+      );
 
     /*
-     * rescore=1
+     * Normal dashboard load:
      *
-     * Keep the existing Currents articles,
-     * but run OpenAI again.
+     * /api/news-triggers
      *
-     * Useful while tuning the scoring prompt.
-     *
-     * This costs OpenAI only.
+     * ZERO Currents calls
+     * ZERO OpenAI calls
+     * ZERO emails
      */
-    const shouldRescore =
-      request.nextUrl.searchParams.get(
-        "rescore",
-      ) === "1";
-
-    let candidates =
-      await readCandidatesCache();
-
-    let scored =
-      await readScoredCache();
-
-    if (shouldRefresh) {
-      console.log(
-        "Fetching fresh news from Currents...",
+    if (!shouldRefresh) {
+      return NextResponse.json(
+        buildResponse(
+          history,
+        ),
       );
-
-      const freshArticles =
-        await fetchNewsTriggerCandidates();
-
-      candidates =
-        await writeCandidatesCache(
-          freshArticles,
-        );
-
-      console.log(
-        `Saved ${freshArticles.length} fresh Currents articles.`,
-      );
-
-      console.log(
-        "Scoring fresh articles with OpenAI...",
-      );
-
-      scored =
-        await scoreArticles(
-          candidates,
-        );
-    } else if (
-      shouldRescore
-    ) {
-      if (!candidates) {
-        throw new Error(
-          "No cached Currents articles found. Run ?refresh=1 first.",
-        );
-      }
-
-      console.log(
-        "Rescoring cached articles with OpenAI...",
-      );
-
-      scored =
-        await scoreArticles(
-          candidates,
-        );
-    } else {
-      /*
-       * Normal dashboard request.
-       *
-       * No Currents.
-       * No OpenAI.
-       */
-      if (scored) {
-        console.log(
-          `Using scored news cache from ${scored.scoredAt}`,
-        );
-      } else {
-        /*
-         * If raw candidates exist but scored cache doesn't,
-         * score them once automatically.
-         */
-        if (!candidates) {
-          throw new Error(
-            "No news cache found. Run /api/news-triggers?refresh=1 first.",
-          );
-        }
-
-        console.log(
-          "No scored cache found. Scoring cached articles once...",
-        );
-
-        scored =
-          await scoreArticles(
-            candidates,
-          );
-      }
     }
 
-    const results =
-      scored.results;
-
-    const opportunities =
-      results.filter(
-        (item) =>
-          item.score.relevanceScore >=
-          70,
+    /*
+     * Manual or scheduled refresh:
+     *
+     * /api/news-triggers?refresh=1
+     *
+     * Currents runs
+     * → new articles identified
+     * → only new articles scored
+     * → new >=70 articles emailed
+     * → history saved
+     */
+    const refreshed =
+      await refreshNews(
+        history,
       );
 
-    const ignored =
-      results.filter(
-        (item) =>
-          item.score.relevanceScore <
-          70,
-      );
-
-    return NextResponse.json({
-      opportunities,
-
-      counts: {
-        fetched:
-          results.length,
-        scored:
-          results.length,
-        opportunities:
-          opportunities.length,
-        ignored:
-          ignored.length,
-      },
-
-      ignored,
-
-      cache: {
-        fetchedAt:
-          scored.fetchedAt,
-        scoredAt:
-          scored.scoredAt,
-
-        source: shouldRefresh
-          ? "currents_and_openai"
-          : shouldRescore
-            ? "cached_currents_and_openai"
-            : "cache",
-      },
-    });
+    return NextResponse.json(
+      buildResponse(
+        refreshed.history,
+        refreshed
+          .fetchedThisRefresh,
+        refreshed
+          .scoredThisRefresh,
+      ),
+    );
   } catch (error) {
     console.error(
       "News trigger pipeline failed:",

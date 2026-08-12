@@ -3189,3 +3189,31 @@ section:has(> div > h2:first-child) {
       display: none;
     }
   }
+
+  .news-new-pill {
+    display: inline-flex;
+    align-items: center;
+  
+    padding: 5px 9px;
+  
+    color: #ffffff;
+  
+    background:
+      linear-gradient(
+        120deg,
+        #315efb,
+        #7259e8,
+        #cf67b3
+      );
+  
+    border-radius: 999px;
+  
+    box-shadow:
+      0 5px 14px
+        rgba(91, 79, 211, 0.18);
+  
+    font-size: 0.61rem;
+    font-weight: 740;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }

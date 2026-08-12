@@ -76,7 +76,12 @@ type NewsTrigger = {
   category: string[];
   published: string;
   domain: string;
+
   score: NewsTriggerScore;
+
+  firstSeenAt: string;
+  lastSeenAt: string;
+  isNew: boolean;
 };
 
 type NewsTriggerResponse = {
@@ -87,6 +92,10 @@ type NewsTriggerResponse = {
     scored: number;
     opportunities: number;
     ignored: number;
+
+    newArticles?: number;
+    newOpportunities?: number;
+    scoredThisRefresh?: number;
   };
   cache?: {
     fetchedAt?: string;
@@ -944,11 +953,28 @@ export default function Dashboard() {
                             </div>
                           </div>
 
-                          <span className={`trigger-action-pill ${scoreBand}`}>
-                            {trigger.score.recommendedAction === "generate_outreach"
-                              ? "High relevance"
-                              : "Review"}
-                          </span>
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 7,
+                            }}
+                          >
+                            {trigger.isNew && (
+                              <span className="news-new-pill">
+                                ✦ New
+                              </span>
+                            )}
+
+                            <span
+                              className={`trigger-action-pill ${scoreBand}`}
+                            >
+                              {trigger.score.recommendedAction ===
+                              "generate_outreach"
+                                ? "High relevance"
+                                : "Review"}
+                            </span>
+                          </div>
                         </div>
 
                         <a

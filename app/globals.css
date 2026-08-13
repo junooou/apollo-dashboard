@@ -230,6 +230,29 @@ header.top h1 {
   font-weight: 600;
 }
 
+/* Inline re-scan control inside the Voncierge Outreach pill — deliberately
+   not a full `button` (no border/background of its own) so it reads as part
+   of the pill, not a separate control competing for attention. */
+.pill-refresh {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0 0 0 2px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: inherit;
+  line-height: 1;
+}
+
+.pill-refresh:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.pill-refresh:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 section.panel {
   border: 1px solid var(--border);
   border-radius: var(--radius);

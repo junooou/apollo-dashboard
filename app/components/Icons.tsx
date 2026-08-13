@@ -179,6 +179,12 @@ export const Sliders = (p: IconProps) => (
   </Svg>
 );
 
+export const BarChart = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 20V10M12 20V4M20 20v-7" />
+  </Svg>
+);
+
 export const Reset = (p: IconProps) => (
   <Svg {...p}>
     <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />

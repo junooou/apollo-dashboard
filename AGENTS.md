@@ -12,6 +12,12 @@ CSVs. It automates a workflow previously done by hand. The domain rules live in
 filtering logic.** It is the source of truth for who counts as a relevant
 contact, and it records the reasoning behind decisions that look arbitrary.
 
+**This app is being moved to AWS for team-wide use.** It still runs locally
+today (single user, local files, no auth) — see **`AWS_DEPLOYMENT_NOTES.md`**
+for the running list of what has to change before/during that move, and add to
+it whenever you build something that assumes local, single-user operation
+(local file storage, an OS username as an identity, etc.).
+
 ## Commands
 
 ```bash
@@ -30,10 +36,12 @@ lib/filter.ts     Relevance rules engine (the heart of the app)
 lib/enrich.ts     Enrichment pipeline + post-reveal guards. SPENDS CREDITS.
 lib/csv.ts        CSV read/write, pinned to the shipped schema; dedupe index
 lib/settings.ts   Settings persistence (data/settings.json)
+lib/history.ts    Run history persistence (data/runs.json) — local file, see below
 lib/runlog.ts     Generates a context.md table row
 lib/sheets.ts     Google Sheets client (service account) — see below
 lib/news.ts       Google News RSS fetch for the company overview
 app/page.tsx      The 3-stage dashboard
+app/history/      Run History dashboard — past runs logged on this machine
 app/settings/     Settings UI
 app/api/*/route.ts  Server endpoints
 criteria.default.json  context.md's rules as data
@@ -47,6 +55,16 @@ criteria.default.json  context.md's rules as data
 - `POST /people/bulk_match` — 1–9 credits per person, **max 10 per call**,
   0 credits when nothing is found. Observed: 1 credit per standard reveal,
   3 per waterfall.
+- `GET /organizations/enrich` — **1 credit per call**, verified live
+  (2026-08-13: three consecutive calls each dropped the account balance by
+  exactly 1). This is despite `searchOrganizations()` in `lib/apollo.ts` also
+  calling this same endpoint during the (free) Step 1 company search when a
+  user types a domain rather than a name — that path is free in practice only
+  because most lookups go through `mixed_companies/search` instead. Any *new*
+  caller of `enrichOrganization()` (the org-profile/firmographic-detail
+  function) must go behind an explicit user action, same as people enrichment
+  — see the "Load company profile" button in `app/page.tsx`, which exists
+  specifically so this never fires automatically on company selection.
 
 Never add a code path that enriches without explicit user selection. The
 review-then-approve gate in `app/page.tsx` is a deliberate product decision, not
@@ -209,6 +227,21 @@ polling ahead of a webhook. Config lives in `GOOGLE_SERVICE_ACCOUNT_EMAIL` /
 `GOOGLE_PRIVATE_KEY` in `.env.local`; see `.env.local.example` for the Cloud
 Console setup steps.
 
+**MCP is never involved here, same as with Apollo.** The
+`mcp__claude_ai_Google_Drive__*` tools some AI clients have access to are a
+Claude-Code-only mechanism for diagnostics in a chat session — they run
+under the *user's own* Google OAuth identity, not this app's. This deployed
+Next.js server has no MCP client and cannot call MCP tools; it only ever
+reaches Google via `googleapis` and this service account's JWT, exactly like
+Apollo's REST API. If Google Sheets/Docs access looks broken, the fix is
+always in `GOOGLE_SERVICE_ACCOUNT_EMAIL`/`GOOGLE_PRIVATE_KEY`/sharing
+settings or the query logic in `lib/sheets.ts` — never "enable MCP", which
+isn't a thing this app has a slot for. Verified live (2026-08-13): the
+service account already has full member access to the "Voncierge Outreach"
+shared drive (`drives.get` on `GOOGLE_PARENT_FOLDER_ID` succeeds), so a
+report of "can't find X" there is a query-logic question (see
+`listSpreadsheetsInFolder()` below), not an access question.
+
 **A service account has zero access to any spreadsheet until the sheet is
 explicitly shared with its `client_email`, as Editor.** This is the most
 common failure mode — a 403/404 from `app/api/sheets/route.ts` almost always
@@ -253,13 +286,81 @@ that multiple sourcing runs land in the same sheet without clobbering earlier
 rows.
 
 **The existing-contacts check (`GET /api/sheets?checkCompany=`) is a
-heuristic, not an exact lookup.** It reads every spreadsheet in
-`GOOGLE_PARENT_FOLDER_ID`, finds each one's `company` column, and matches
-case-insensitively with substring fallback in both directions (guarded by
-`MIN_FUZZY_LEN` so short names can't match everything) — this absorbs naming
-drift like "OCBC" vs "OCBC Bank" between Apollo's canonical name and whatever
-got typed into a sheet by hand. It is intentionally forgiving; do not tighten
-it to exact-match without checking it still catches real drift cases.
+heuristic, not an exact lookup.** It reads every spreadsheet reachable from
+`GOOGLE_PARENT_FOLDER_ID` (see below — this now means subfolders too), finds
+each one's `company` column, and matches case-insensitively with substring
+fallback in both directions (guarded by `MIN_FUZZY_LEN` so short names can't
+match everything) — this absorbs naming drift like "OCBC" vs "OCBC Bank"
+between Apollo's canonical name and whatever got typed into a sheet by hand.
+It is intentionally forgiving; do not tighten it to exact-match without
+checking it still catches real drift cases.
+
+**`listSpreadsheetsInFolder()` recurses into subfolders — this was a real
+bug until 2026-08-13.** It originally queried only `'<folderId>' in parents`,
+i.e. files directly inside the configured folder. The real "Voncierge
+Outreach" shared drive doesn't keep sheets at that top level at all — every
+actual sourced-contact sheet lives one level down, inside an "Outreach
+Sheets" subfolder (confirmed live: DBS Bank has 36 real contacts in "1st
+Outreach Wave - Competitor Reach (Amity & Tetherfi) 2026", inside that
+subfolder). The old code silently found zero matches for every company,
+every time — not a credentials problem, not an MCP problem (the app never
+uses MCP; a service account via `googleapis` has full read/write access,
+confirmed live via `drives.get`/`drives.list`), just a folder-depth-of-1
+assumption that didn't match how the real Drive is organized. Fixed by
+`collectFolderIds()` walking subfolders breadth-first up to
+`MAX_FOLDER_DEPTH` (4) before querying — see `lib/sheets.ts`. If this ever
+regresses to "finds nothing", check folder depth before anything else.
+
+**Data quality inside the sheets themselves is not this app's problem to
+silently fix.** Some rows in "1st Outreach Wave - Competitor Reach" have a
+seniority-tier word ("manager", "vp", "c_suite", "owner") sitting in the
+`email` column and a real email address sitting in `linkedin_url` — the
+sheet's own data is shifted for those rows, most likely a missing
+`seniority` column in that particular sheet's header versus its data. This
+app reads exactly what's in the cells under whatever header names are
+present; it does not guess or reshuffle values. If asked to "fix" this,
+that's a decision for whoever owns that sheet to make by editing it
+directly, not something to patch around in code.
+
+**"No existing contacts found" only means no Google Sheet has that company —
+it says nothing about local CSVs.** Verified live (2026-08-13): DBS Bank
+correctly shows "no existing contacts found in your sheets" because DBS's
+contacts were only ever saved to `Apollo Lead Generation/DBS.csv`, never
+pushed to a Sheet via "Push to Sheet". This is not a bug in the check; it is
+the check doing exactly what its name says. The separate, existing local-CSV
+dedupe (`indexExistingContacts` in `lib/csv.ts`, used inside
+`app/api/search/route.ts` to flag `ScoredCandidate.alreadySourcedIn` as
+`"csv"`) is what covers CSV-only history — the two checks are intentionally
+separate data sources, not one unified index. Don't conflate a user asking
+"why doesn't the app know about this CSV-only contact" with a Sheets-check
+bug.
+
+**The sheets index (`lib/sheets.ts`: `warmSheetsIndex` / `getCachedSheetsIndex`
+/ `invalidateSheetsIndex`) is an in-memory, whole-folder cache that makes the
+above check fast.** Before this existed, every single `checkCompany` call
+re-scanned every spreadsheet in the folder from scratch (`readRange` on each,
+up to `A1:Z5000`) — slow, and repeated on every company selection in a
+session. Now the first caller (in practice, `app/page.tsx`'s mount-time call
+to `app/api/sheets-index/route.ts`, which drives the "Loading Voncierge
+Outreach…" header pill) scans once and caches every contact row from every
+sheet; `findContactsForCompany` then just filters that cached array in
+memory. **Call `invalidateSheetsIndex()` after any write that changes what's
+in the folder** (`app/api/sheets/route.ts` already does, after
+create/append/update/pushContacts) — otherwise a push in the same session
+would silently not show up in the next check until the server restarts. This
+cache is per-process, in server memory, not a file — it does not persist
+across restarts and, once this runs as multiple AWS instances behind a load
+balancer, will not be consistent across them; see `AWS_DEPLOYMENT_NOTES.md`.
+
+An `instrumentation.ts` `register()` hook was tried to start this scan at
+server-process boot rather than waiting for a browser tab — **reverted**,
+because Next.js also compiles `instrumentation.ts` for the Edge runtime, and
+`googleapis` (pulled in via `lib/sheets.ts`) needs Node-only builtins that
+don't exist there. The runtime-guarded import still broke the Edge
+*compilation* and took the whole app down with 500s. Do not re-add a direct
+`lib/sheets` import to `instrumentation.ts`; see the note in
+`app/api/sheets-index/route.ts` for the safe way to revisit this (route it
+through `fetch()` instead).
 
 ## Company news (`lib/news.ts`)
 

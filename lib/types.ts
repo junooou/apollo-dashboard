@@ -24,6 +24,35 @@ export type Organization = {
   linkedinUrl: string | null;
 };
 
+/**
+ * Firmographic detail for a single resolved organization — industry, size,
+ * HQ, funding. Deliberately separate from `Organization`: that type is built
+ * from `mixed_companies/search`, which carries no industry/funding field at
+ * all, so this only ever gets populated from `organizations/enrich` once the
+ * user has picked a specific company (see `enrichOrganization` in lib/apollo.ts).
+ */
+export type OrganizationProfile = {
+  id: string;
+  name: string;
+  domain: string | null;
+  websiteUrl: string | null;
+  linkedinUrl: string | null;
+  industry: string | null;
+  employeeCount: number | null;
+  foundedYear: number | null;
+  shortDescription: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  phone: string | null;
+  keywords: string[];
+  totalFundingPrinted: string | null;
+  latestFundingStage: string | null;
+  latestFundingDate: string | null;
+  publiclyTraded: boolean;
+  stockSymbol: string | null;
+};
+
 /** A person as returned by search, before any credits are spent. */
 export type Candidate = {
   apolloPersonId: string;

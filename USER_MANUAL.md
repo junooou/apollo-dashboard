@@ -25,6 +25,9 @@ Google Doc.**
 
 The app runs on your own computer (`localhost:3100`), not on a public
 website. Only people on your machine, on your network config, can open it.
+(This is expected to change — the app is planned to move onto AWS so the
+whole team can reach one shared version; this manual will be updated when
+that happens.)
 
 ---
 
@@ -49,6 +52,15 @@ Once installed, someone runs `npm run dev` in a terminal and leaves it
 running. You then open **http://localhost:3100** in your browser. If that
 terminal window is closed, the app stops working — just ask whoever set it up
 to start it again.
+
+If Google Sheets is configured, the first time you open the app you'll see a
+small badge near the top-right that reads **"Loading Voncierge Outreach…"**
+with a spinner — it's scanning every spreadsheet in the shared Voncierge
+Outreach Drive folder so the app knows who's already been sourced. Once it
+finishes, it flips to **"✓ Voncierge Outreach loaded — N sheets acquired."**
+This only happens once per time the app is started (there's a small ↻ button
+on the badge if you ever want to force a re-check, e.g. if a colleague just
+pushed contacts from their own copy of the app).
 
 ---
 
@@ -87,6 +99,26 @@ order.
 partial on purpose — surnames are shown masked (e.g. "Ga\*\*\*i") and location
 / LinkedIn details are hidden. That's Apollo protecting its own data, not a
 bug — full details only appear once you decide to pay for a contact in Step 3.
+
+**Optional: "Load company profile" (costs 1 credit).** Once a company is
+picked, a button appears offering industry, employee count, headquarters,
+founding year, and funding stage for that company. Unlike everything else in
+this step, this one small button **does spend 1 Apollo credit** when clicked
+— that's why it isn't shown automatically. Use it when you want a sanity
+check that you've picked the right entity (e.g. confirming you're looking at
+a company's HQ, not an unrelated business unit) or a quick sense of company
+size before committing to a full search.
+
+**"Already logged" check.** Once a company is picked, the app also tells you
+whether it already has contacts for that company sitting in a Google Sheet
+inside the shared Voncierge Outreach Drive folder (free — this reads the
+cache described in §2 above, not a live Apollo call). Two things worth
+knowing: it checks **Google Sheets only** — if that company was ever sourced
+but the results were only downloaded as a CSV and never pushed to a Sheet,
+this will say "no existing contacts found" even though contacts do exist
+somewhere, in the local `Apollo Lead Generation` folder. It's also
+free-text-matched by company name, so slightly different spellings ("OCBC"
+vs. "OCBC Bank") are usually still caught, but it isn't a guarantee.
 
 ### Step 2 — Review before spending credits (still free)
 
@@ -154,7 +186,23 @@ From the results screen you can:
 
 ---
 
-## 5. Outreach Studio — turning contacts into an email
+## 5. Run History — seeing what's already been sourced
+
+Click **"Run history"** near the top of the main screen. This is an automatic
+log of every sourcing run completed on this app — no need to keep pasting
+summaries into a shared document by hand. For each run you'll see the date,
+the company, how many contacts landed in the CSV, how many were dropped,
+credits used, and who ran it, plus running totals at the top of the page.
+
+Every run is added here the moment Step 3 (Enrich) finishes — you don't need
+to do anything extra. Right now this history is **local to the machine you're
+using**: if a colleague runs the app on their own computer, their runs show
+up in their own Run History, not yours. A shared, team-wide view is planned
+as part of moving this app onto AWS.
+
+---
+
+## 6. Outreach Studio — turning contacts into an email
 
 Click the **"✦ Outreach Studio"** tab. This is a separate tool for drafting
 outbound emails — it does not require you to have sourced contacts first.
@@ -178,7 +226,7 @@ you'll see an error only on this tab — Lead Sourcing is unaffected.
 
 ---
 
-## 6. Filters — tuning who counts as "relevant"
+## 7. Filters — tuning who counts as "relevant"
 
 Click **"Targeting filters"** (near the search box) to go to `/filters`.
 This screen controls the *rules* the app uses to decide who's worth showing
@@ -211,7 +259,7 @@ the underlying title/seniority/location/keyword rules directly.
 
 ---
 
-## 7. Reading the colours
+## 8. Reading the colours
 
 The app uses colour to mean something specific, not just decoration:
 
@@ -224,7 +272,7 @@ The app uses colour to mean something specific, not just decoration:
 
 ---
 
-## 8. Common questions / troubleshooting
+## 9. Common questions / troubleshooting
 
 **"The page won't load at all."**
 The background server (`npm run dev`) probably isn't running. Ask whoever

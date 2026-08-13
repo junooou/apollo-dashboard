@@ -7,6 +7,7 @@ import OutreachGenerator from "./components/OutreachGenerator";
 import {
   AlertCircle,
   AlertTriangle,
+  BarChart,
   Building,
   Check,
   Download,
@@ -31,6 +32,7 @@ import {
 import type {
   EnrichedContact,
   Organization,
+  OrganizationProfile,
   RunSummary,
   ScoredCandidate,
   Settings,
@@ -133,6 +135,13 @@ export default function Dashboard() {
   const [existingLoading, setExistingLoading] = useState(false);
   const [existingError, setExistingError] = useState<string | null>(null);
 
+  // Company profile — industry, size, HQ, funding — from Apollo's org-enrich
+  // endpoint. Fires alongside news/existing-contacts, but only when a domain
+  // is known (mixed_companies/search results without one can't be enriched).
+  const [orgProfile, setOrgProfile] = useState<OrganizationProfile | null>(null);
+  const [orgProfileLoading, setOrgProfileLoading] = useState(false);
+  const [orgProfileError, setOrgProfileError] = useState<string | null>(null);
+
   useEffect(() => {
     setExistingContactsOpen(false);
 
@@ -141,6 +150,8 @@ export default function Dashboard() {
       setNewsError(null);
       setExistingContacts(null);
       setExistingError(null);
+      setOrgProfile(null);
+      setOrgProfileError(null);
       return;
     }
 
@@ -180,9 +191,34 @@ export default function Dashboard() {
         if (!cancelled) setExistingLoading(false);
       });
 
+    // Company profile is NOT fetched here. Unlike news/existing-contacts
+    // (both free — Google News RSS and a Google Sheets read), organizations/enrich
+    // costs 1 Apollo credit per call, verified live (2026-08-13). Firing it
+    // automatically on every company selection would spend shared team credits
+    // without asking, which is exactly what AGENTS.md's credit-gate rule
+    // forbids — so it only runs when the user clicks "Load company profile".
+    setOrgProfile(null);
+    setOrgProfileError(null);
+
     return () => {
       cancelled = true;
     };
+  }, [selectedOrg]);
+
+  const loadOrgProfile = useCallback(() => {
+    if (!selectedOrg?.domain) return;
+    setOrgProfileLoading(true);
+    setOrgProfileError(null);
+    fetch(`/api/org-profile?domain=${encodeURIComponent(selectedOrg.domain)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.error) throw new Error(d.error);
+        setOrgProfile(d.profile);
+      })
+      .catch((err) => {
+        setOrgProfileError(err instanceof Error ? err.message : "Failed to load company profile");
+      })
+      .finally(() => setOrgProfileLoading(false));
   }, [selectedOrg]);
 
   const refreshCredits = useCallback(async () => {
@@ -196,8 +232,38 @@ export default function Dashboard() {
     }
   }, []);
 
+  // Voncierge Outreach sheets index — this mount-time fetch is what actually
+  // triggers the scan (see /api/sheets-index): every spreadsheet in the
+  // shared Drive folder, read once and cached in-memory server-side so every
+  // "already sourced" check afterwards is instant instead of re-scanning.
+  const [sheetsIndexLoading, setSheetsIndexLoading] = useState(true);
+  const [sheetsIndexStatus, setSheetsIndexStatus] = useState<{
+    configured: boolean;
+    sheetCount?: number;
+    contactCount?: number;
+    loadedAt?: string;
+    error?: string;
+  } | null>(null);
+
+  const refreshSheetsIndex = useCallback(async (force = false) => {
+    setSheetsIndexLoading(true);
+    try {
+      const res = await fetch(`/api/sheets-index${force ? "?force=1" : ""}`);
+      const data = await res.json();
+      setSheetsIndexStatus(data);
+    } catch (err) {
+      setSheetsIndexStatus({
+        configured: true,
+        error: err instanceof Error ? err.message : "Failed to load",
+      });
+    } finally {
+      setSheetsIndexLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     refreshCredits();
+    refreshSheetsIndex();
     fetch("/api/settings")
       .then((r) => r.json())
       .then((d) => {
@@ -501,10 +567,14 @@ export default function Dashboard() {
           data.rowsPushed
         } row${data.rowsPushed === 1 ? "" : "s"}.`,
       );
-  
+
       if (sheetMode === "create") {
         setNewSheetName("");
       }
+
+      // These rows just changed what's already-sourced — re-warm so the next
+      // company check (this session or the header count) reflects them.
+      refreshSheetsIndex(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Google Sheets export failed");
     } finally {
@@ -583,6 +653,56 @@ export default function Dashboard() {
           />
 
           <div className="header-meta">
+            <a href="/history" className="filter-settings-link">
+              <BarChart size={15} />
+              Run history
+            </a>
+
+            {sheetsIndexStatus?.configured !== false && (
+              <span
+                className="credit-pill"
+                title={
+                  sheetsIndexLoading
+                    ? "Scanning every spreadsheet in the Voncierge Outreach shared drive"
+                    : sheetsIndexStatus?.error
+                      ? sheetsIndexStatus.error
+                      : sheetsIndexStatus?.loadedAt
+                        ? `Loaded ${new Date(sheetsIndexStatus.loadedAt).toLocaleTimeString()} — click to re-scan`
+                        : undefined
+                }
+              >
+                {sheetsIndexLoading ? (
+                  <>
+                    <span className="spinner" />
+                    <span>Loading Voncierge Outreach…</span>
+                  </>
+                ) : sheetsIndexStatus?.error ? (
+                  <>
+                    <AlertTriangle size={13} />
+                    <span>Voncierge Outreach unavailable</span>
+                  </>
+                ) : (
+                  <>
+                    <Check size={13} />
+                    <span>
+                      Voncierge Outreach loaded — {sheetsIndexStatus?.sheetCount ?? 0} sheet
+                      {sheetsIndexStatus?.sheetCount === 1 ? "" : "s"} acquired
+                    </span>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="pill-refresh"
+                  onClick={() => refreshSheetsIndex(true)}
+                  disabled={sheetsIndexLoading}
+                  aria-label="Re-scan the Voncierge Outreach shared drive"
+                  title="Re-scan the Voncierge Outreach shared drive"
+                >
+                  ↻
+                </button>
+              </span>
+            )}
+
             <span
               className="credit-pill"
               title="Lead credits remaining on this Apollo account"
@@ -725,6 +845,59 @@ export default function Dashboard() {
             rather than in a separate boxed-off panel. */}
         {!searchOpen && selectedOrg && (
           <div className="overview">
+            {selectedOrg.domain && (
+              <div className="overview-block">
+                <div className="overview-label small muted">Company profile</div>
+                {orgProfileLoading ? (
+                  <p className="small muted">Loading company profile…</p>
+                ) : orgProfileError ? (
+                  <p className="small muted">
+                    Couldn&apos;t load company profile ({orgProfileError}).
+                  </p>
+                ) : !orgProfile ? (
+                  <button type="button" className="ghost" onClick={loadOrgProfile}>
+                    <Building size={14} />
+                    Load company profile · 1 credit
+                  </button>
+                ) : (
+                  <>
+                    <p className="small">
+                      {[
+                        orgProfile.industry,
+                        orgProfile.employeeCount
+                          ? `${orgProfile.employeeCount.toLocaleString()} employees`
+                          : null,
+                        [orgProfile.city, orgProfile.country].filter(Boolean).join(", ") ||
+                          null,
+                        orgProfile.foundedYear ? `founded ${orgProfile.foundedYear}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || "No firmographic detail on record for this domain."}
+                    </p>
+                    {orgProfile.shortDescription && (
+                      <p className="small muted">{orgProfile.shortDescription}</p>
+                    )}
+                    {orgProfile.publiclyTraded ? (
+                      <p className="small muted">
+                        Publicly traded
+                        {orgProfile.stockSymbol ? ` (${orgProfile.stockSymbol})` : ""}
+                      </p>
+                    ) : orgProfile.latestFundingStage ? (
+                      <p className="small muted">
+                        Latest funding: {orgProfile.latestFundingStage}
+                        {orgProfile.latestFundingDate
+                          ? ` (${new Date(orgProfile.latestFundingDate).toLocaleDateString()})`
+                          : ""}
+                        {orgProfile.totalFundingPrinted
+                          ? ` · ${orgProfile.totalFundingPrinted} raised to date`
+                          : ""}
+                      </p>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            )}
+
             {(existingLoading || existingContacts || existingError) && (
               <div className="overview-block">
                 {existingLoading ? (

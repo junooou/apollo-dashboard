@@ -10,7 +10,7 @@
  *   - people/bulk_match    -> COSTS credits, max 10 people per call
  */
 
-import type { Candidate, Organization } from "./types";
+import type { Candidate, Organization, OrganizationProfile } from "./types";
 
 const BASE = "https://api.apollo.io/api/v1";
 
@@ -253,6 +253,79 @@ export async function searchOrganizations(query: string): Promise<Organization[]
 
       return a.name.length - b.name.length;
     });
+}
+
+/**
+ * Fields `organizations/enrich` returns beyond what `toOrganization` above
+ * pulls out — industry, HQ, funding. `mixed_companies/search` (the name-search
+ * path) never carries these, so this is the only source for them.
+ */
+type RawOrgProfile = RawOrg & {
+  industry?: string;
+  founded_year?: number;
+  short_description?: string;
+  city?: string;
+  state?: string;
+  country?: string;
+  phone?: string;
+  keywords?: string[];
+  total_funding_printed?: string;
+  latest_funding_stage?: string;
+  latest_funding_round_date?: string;
+  publicly_traded_symbol?: string | null;
+};
+
+/**
+ * Fetch firmographic detail (industry, size, HQ, funding stage) for one
+ * resolved organization, to orient the user before they spend a search on it.
+ *
+ * Requires a domain — Apollo's org-enrich endpoint takes `domain`, not an
+ * `id`, which is why this is called only after the user has picked a specific
+ * organization (its domain is known by then), not for every raw search match.
+ *
+ * COSTS 1 CREDIT PER CALL — verified live (2026-08-13): three calls in a row
+ * dropped the account's lead-credit balance by exactly 1 each time. This is
+ * true even though `searchOrganizations`'s existing domain-lookup path also
+ * calls this same endpoint during Step 1 (free) company search — that call
+ * happens to be free in practice only because it's the rarer path (most
+ * lookups go through the by-name `mixed_companies/search`, which is free).
+ * Callers of THIS function must treat it like `people/bulk_match`: never call
+ * it without an explicit user action. See the "Company profile" button in
+ * app/page.tsx — deliberately not automatic on company selection, matching
+ * the credit-gate rule in AGENTS.md.
+ */
+export async function enrichOrganization(domain: string): Promise<OrganizationProfile | null> {
+  const normalised = normaliseDomain(domain);
+  if (!normalised) return null;
+
+  const data = await request<{ organization?: RawOrgProfile }>(
+    `/organizations/enrich?domain=${encodeURIComponent(normalised)}`,
+    { method: "GET" },
+  );
+  const raw = data.organization;
+  if (!raw) return null;
+
+  return {
+    id: raw.id ?? "",
+    name: raw.name ?? "",
+    domain: normaliseDomain(raw.primary_domain ?? raw.domain ?? normalised),
+    websiteUrl: raw.website_url ?? null,
+    linkedinUrl: raw.linkedin_url ?? null,
+    industry: raw.industry ?? null,
+    employeeCount: raw.estimated_num_employees ?? null,
+    foundedYear: raw.founded_year ?? null,
+    shortDescription: raw.short_description ?? null,
+    city: raw.city ?? null,
+    state: raw.state ?? null,
+    country: raw.country ?? null,
+    phone: raw.phone ?? null,
+    keywords: Array.isArray(raw.keywords) ? raw.keywords.slice(0, 8) : [],
+    totalFundingPrinted: raw.total_funding_printed ?? null,
+    latestFundingStage: raw.latest_funding_stage ?? null,
+    latestFundingDate: raw.latest_funding_round_date ?? null,
+    publiclyTraded: Boolean(raw.publicly_traded_symbol),
+    stockSymbol: raw.publicly_traded_symbol ?? null,
+  };
 }
 
 /* ------------------------------------------------------------------ */

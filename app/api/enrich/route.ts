@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getCreditsRemaining } from "@/lib/apollo";
 import { enrichCandidates } from "@/lib/enrich";
+import { appendRun } from "@/lib/history";
 import { loadSettings } from "@/lib/settings";
 import type { RunSummary, ScoredCandidate } from "@/lib/types";
 
@@ -82,6 +83,10 @@ export async function POST(req: Request) {
       issues: result.issues,
       droppedContacts: dropped,
     };
+
+    // Logged regardless of what the user does next (download, push to Sheet,
+    // or nothing) — this is the record of the run, not of the export.
+    await appendRun(summary);
 
     return NextResponse.json({ contacts: successful, summary });
   } catch (err) {

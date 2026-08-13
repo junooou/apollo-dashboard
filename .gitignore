@@ -1,6 +1,7 @@
 node_modules/
 .next/
 data/settings.json
+data/runs.json
 .env.local
 *.tsbuildinfo
 next-env.d.ts

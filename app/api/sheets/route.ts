@@ -3,6 +3,7 @@ import {
   appendRows,
   createSpreadsheet,
   findContactsForCompany,
+  invalidateSheetsIndex,
   listSpreadsheetsInFolder,
   readRange,
   updateRange,
@@ -134,7 +135,11 @@ export async function POST(req: Request) {
           parentFolderId,
         },
       );
-    
+
+      // A new spreadsheet just appeared in the folder — the cached sheet list
+      // (and therefore every "already sourced" check) is now stale.
+      invalidateSheetsIndex();
+
       return NextResponse.json(result);
     }
 
@@ -156,6 +161,10 @@ export async function POST(req: Request) {
       const payload = needsHeader ? [columns, ...rows] : rows;
 
       const result = await appendRows(body.spreadsheetId, "A1", payload);
+
+      // New contacts just landed in this sheet — refresh on next read.
+      invalidateSheetsIndex();
+
       return NextResponse.json({ ...result, headerAdded: needsHeader, rowsPushed: rows.length });
     }
 
@@ -168,11 +177,13 @@ export async function POST(req: Request) {
 
     if (body.mode === "append") {
       const result = await appendRows(body.spreadsheetId, body.range, body.values);
+      invalidateSheetsIndex();
       return NextResponse.json(result);
     }
 
     if (body.mode === "update") {
       const result = await updateRange(body.spreadsheetId, body.range, body.values);
+      invalidateSheetsIndex();
       return NextResponse.json(result);
     }
 

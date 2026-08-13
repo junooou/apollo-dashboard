@@ -50,23 +50,86 @@ export async function readRange(spreadsheetId: string, range: string): Promise<s
   return (res.data.values as string[][] | undefined) ?? [];
 }
 
-/** Lists spreadsheets directly inside a folder (or Shared Drive) — powers the "Push to Sheet" picker. */
-export async function listSpreadsheetsInFolder(
-  folderId: string,
-): Promise<{ id: string; name: string }[]> {
+function getDriveReadClient() {
   const { email, privateKey } = loadCredentials();
   const auth = new google.auth.JWT({
     email,
     key: privateKey,
     scopes: ["https://www.googleapis.com/auth/drive.readonly"],
   });
-  const drive = google.drive({ version: "v3", auth });
+  return google.drive({ version: "v3", auth });
+}
+
+/**
+ * How many folder levels deep to look for spreadsheets, below `folderId`
+ * itself. Verified live (2026-08-13): the real "Voncierge Outreach" shared
+ * drive keeps every sourced-contact sheet one level down, inside an
+ * "Outreach Sheets" subfolder — only an ad-hoc test spreadsheet sat at the
+ * drive's own root. A depth of 1 was silently finding nothing real; this
+ * cap is generous headroom above the one level actually observed in use,
+ * not a guess at what depth is needed.
+ */
+const MAX_FOLDER_DEPTH = 4;
+
+/** Every subfolder ID directly inside `parentId`. */
+async function listSubfolders(
+  drive: ReturnType<typeof getDriveReadClient>,
+  parentId: string,
+): Promise<string[]> {
   const res = await drive.files.list({
-    q: `'${folderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`,
+    q: `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    fields: "files(id)",
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "allDrives",
+  });
+  return (res.data.files ?? []).map((f) => f.id!).filter(Boolean);
+}
+
+/**
+ * `rootId` plus every folder ID reachable underneath it — a breadth-first
+ * walk capped at `MAX_FOLDER_DEPTH` so a pathological folder structure can't
+ * cause runaway recursion. Needed because the shared Drive folder this app
+ * points at is not flat: real contact sheets live inside a subfolder, not
+ * directly in the folder configured as GOOGLE_PARENT_FOLDER_ID.
+ */
+async function collectFolderIds(
+  drive: ReturnType<typeof getDriveReadClient>,
+  rootId: string,
+): Promise<string[]> {
+  const all = [rootId];
+  let frontier = [rootId];
+
+  for (let depth = 0; depth < MAX_FOLDER_DEPTH && frontier.length > 0; depth++) {
+    const children = await Promise.all(frontier.map((id) => listSubfolders(drive, id)));
+    frontier = children.flat();
+    all.push(...frontier);
+  }
+
+  return all;
+}
+
+/**
+ * Lists every spreadsheet inside a folder (or Shared Drive) OR any of its
+ * subfolders — powers both the "Push to Sheet" picker and the existing-
+ * contacts scan. Recurses because the real shared Drive this app targets
+ * organizes sheets inside a subfolder rather than at the top level; a
+ * direct-children-only query silently misses everything real.
+ */
+export async function listSpreadsheetsInFolder(
+  folderId: string,
+): Promise<{ id: string; name: string }[]> {
+  const drive = getDriveReadClient();
+  const folderIds = await collectFolderIds(drive, folderId);
+
+  const parentClause = folderIds.map((id) => `'${id}' in parents`).join(" or ");
+  const res = await drive.files.list({
+    q: `(${parentClause}) and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`,
     fields: "files(id, name)",
     orderBy: "name",
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
+    corpora: "allDrives",
   });
   return (res.data.files ?? []).map((f) => ({ id: f.id!, name: f.name! }));
 }
@@ -99,6 +162,7 @@ export type SheetContact = {
   firstname: string;
   lastname: string;
   title: string;
+  company: string;
   email: string;
   linkedinUrl: string;
   apolloPersonId: string;
@@ -106,24 +170,12 @@ export type SheetContact = {
   sheetName: string;
 };
 
-/**
- * Scans every spreadsheet in `folderId` and returns every row whose company
- * column fuzzy-matches `companyName` — full contact detail, not just a
- * count. Many sheets (especially ones built by hand, or pushed before this
- * app tracked apollo_person_id) have no id column at all, so this matches on
- * the company column instead — the one column every contact sheet has.
- */
-export async function findContactsForCompany(
-  folderId: string,
-  companyName: string,
+/** Reads every row of every spreadsheet in `folderId` — the expensive part
+ *  `findContactsForCompany` used to redo on every single company check.
+ *  Unfiltered by company; filtering happens in-memory once this is cached. */
+async function scanAllContacts(
+  sheetsList: { id: string; name: string }[],
 ): Promise<SheetContact[]> {
-  let sheetsList: { id: string; name: string }[];
-  try {
-    sheetsList = await listSpreadsheetsInFolder(folderId);
-  } catch {
-    return [];
-  }
-
   const perSheet = await Promise.all(
     sheetsList.map(async (s): Promise<SheetContact[]> => {
       try {
@@ -144,11 +196,12 @@ export async function findContactsForCompany(
         const out: SheetContact[] = [];
         for (const row of values.slice(1)) {
           const cell = row[companyCol]?.trim() ?? "";
-          if (!cell || !companyNamesMatch(cell, companyName)) continue;
+          if (!cell) continue;
           out.push({
             firstname: firstnameCol >= 0 ? (row[firstnameCol] ?? "").trim() : "",
             lastname: lastnameCol >= 0 ? (row[lastnameCol] ?? "").trim() : "",
             title: titleCol >= 0 ? (row[titleCol] ?? "").trim() : "",
+            company: cell,
             email: emailCol >= 0 ? (row[emailCol] ?? "").trim() : "",
             linkedinUrl: linkedinCol >= 0 ? (row[linkedinCol] ?? "").trim() : "",
             apolloPersonId: idCol >= 0 ? (row[idCol] ?? "").trim() : "",
@@ -164,6 +217,89 @@ export async function findContactsForCompany(
   );
 
   return perSheet.flat();
+}
+
+export type SheetsIndex = {
+  sheets: { id: string; name: string }[];
+  contacts: SheetContact[];
+  loadedAt: string;
+};
+
+/**
+ * In-memory, process-lifetime cache of every contact across every
+ * spreadsheet in the shared Drive folder. Exists so a company check doesn't
+ * re-scan the whole folder (potentially dozens of sheets, thousands of rows)
+ * on every single search — it scans once, then every check after that is a
+ * plain in-memory filter.
+ *
+ * Scope: this cache lives for the life of ONE running `npm run dev` / `npm
+ * start` process, on ONE machine. It is not shared between colleagues each
+ * running their own local copy — see AWS_DEPLOYMENT_NOTES.md for what that
+ * means once this app runs as a shared AWS deployment.
+ */
+let cache: SheetsIndex | null = null;
+let warmingPromise: Promise<SheetsIndex> | null = null;
+
+/**
+ * Populates (or returns the already-populated) sheets index. Concurrent
+ * callers during the initial scan share the same in-flight promise rather
+ * than each kicking off their own — matters because the app's header
+ * (app/page.tsx) and any in-flight "existing contacts" check can both land
+ * here within the same first second after the app loads.
+ */
+export async function warmSheetsIndex(folderId: string, force = false): Promise<SheetsIndex> {
+  if (cache && !force) return cache;
+  if (warmingPromise) return warmingPromise;
+
+  warmingPromise = (async () => {
+    const sheetsList = await listSpreadsheetsInFolder(folderId);
+    const contacts = await scanAllContacts(sheetsList);
+    const index: SheetsIndex = { sheets: sheetsList, contacts, loadedAt: new Date().toISOString() };
+    cache = index;
+    return index;
+  })();
+
+  try {
+    return await warmingPromise;
+  } finally {
+    warmingPromise = null;
+  }
+}
+
+/** Synchronous peek at the current cache, without triggering a scan. */
+export function getCachedSheetsIndex(): SheetsIndex | null {
+  return cache;
+}
+
+/**
+ * Drops the cache so the next read re-scans from Google. Call this after any
+ * write that changes what's in the folder (a new sheet, a push of new
+ * contacts) — otherwise "already sourced" checks would keep reporting
+ * pre-write data until the server restarts.
+ */
+export function invalidateSheetsIndex(): void {
+  cache = null;
+}
+
+/**
+ * Every contact whose company column fuzzy-matches `companyName`, across
+ * every spreadsheet in `folderId`. Uses the warm cache when available —
+ * effectively instant after the first scan — and transparently falls back to
+ * a fresh live scan on a cache miss or read failure, so this keeps working
+ * even if the startup warm-up never ran or failed.
+ */
+export async function findContactsForCompany(
+  folderId: string,
+  companyName: string,
+): Promise<SheetContact[]> {
+  let index: SheetsIndex;
+  try {
+    index = await warmSheetsIndex(folderId);
+  } catch {
+    return [];
+  }
+
+  return index.contacts.filter((c) => companyNamesMatch(c.company, companyName));
 }
 
 /** Appends rows after the last row with data in `range`'s sheet. */

@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MultiSelect } from "./components/Controls";
 import { DeptChip } from "./components/DeptChip";
-import OutreachGenerator from "./components/OutreachGenerator";
+import OutreachGenerator, {
+  type OutreachPrefill,
+} from "./components/OutreachGenerator";
 import {
   AlertCircle,
   AlertTriangle,
@@ -49,10 +51,81 @@ type ExistingContact = {
   sheetName: string;
 };
 
+
+type NewsTriggerScore = {
+  articleId: string;
+  relevant: boolean;
+  relevanceScore: number;
+  company: string | null;
+  industry: string | null;
+  triggerType: string;
+  whyRelevant: string;
+  vonciergeCapabilities: string[];
+  suggestedOutreachAngle: string;
+  recommendedAction: "generate_outreach" | "watch" | "ignore";
+};
+
+type NewsTrigger = {
+  id: string;
+  title: string;
+  description: string;
+  url: string;
+  author: string | null;
+  image: string | null;
+  language: string;
+  category: string[];
+  published: string;
+  domain: string;
+
+  score: NewsTriggerScore;
+
+  firstSeenAt: string;
+  lastSeenAt: string;
+  isNew: boolean;
+};
+
+type NewsTriggerResponse = {
+  opportunities: NewsTrigger[];
+  ignored: NewsTrigger[];
+  counts: {
+    fetched: number;
+    scored: number;
+    opportunities: number;
+    ignored: number;
+
+    newArticles?: number;
+    newOpportunities?: number;
+    scoredThisRefresh?: number;
+  };
+  cache?: {
+    fetchedAt?: string;
+    scoredAt?: string;
+    source?: string;
+  };
+  error?: string;
+};
+
+function formatNewsTriggerDate(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString("en-SG", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 type Stage = "idle" | "searching" | "review" | "enriching" | "done";
 
 export default function Dashboard() {
-  const [workspace, setWorkspace] = useState<"leads" | "outreach">("leads");
+  const [workspace, setWorkspace] = useState<"leads" | "outreach" | "news">("leads");
+  const [outreachPrefill, setOutreachPrefill] = useState<OutreachPrefill | null>(null);
   const [company, setCompany] = useState("");
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -133,6 +206,21 @@ export default function Dashboard() {
   const [existingLoading, setExistingLoading] = useState(false);
   const [existingError, setExistingError] = useState<string | null>(null);
 
+
+  // News Triggers — reads the cached, AI-scored trigger feed by default.
+  // Browser refreshes do not spend Currents or OpenAI requests.
+  const [newsTriggers, setNewsTriggers] = useState<NewsTrigger[]>([]);
+  const [ignoredNewsTriggers, setIgnoredNewsTriggers] = useState<NewsTrigger[]>([]);
+  const [newsTriggerCounts, setNewsTriggerCounts] =
+    useState<NewsTriggerResponse["counts"] | null>(null);
+  const [newsTriggerCache, setNewsTriggerCache] =
+    useState<NewsTriggerResponse["cache"] | null>(null);
+  const [newsTriggersLoading, setNewsTriggersLoading] = useState(false);
+  const [newsTriggersRefreshing, setNewsTriggersRefreshing] = useState(false);
+  const [newsTriggersLoaded, setNewsTriggersLoaded] = useState(false);
+  const [newsTriggersError, setNewsTriggersError] = useState<string | null>(null);
+  const [showIgnoredNews, setShowIgnoredNews] = useState(false);
+
   useEffect(() => {
     setExistingContactsOpen(false);
 
@@ -184,6 +272,53 @@ export default function Dashboard() {
       cancelled = true;
     };
   }, [selectedOrg]);
+
+
+  const loadNewsTriggers = useCallback(async (refresh = false) => {
+    if (refresh) {
+      const confirmed = window.confirm(
+        "Refresh News will fetch fresh articles from Currents and rescore them with OpenAI. This uses API requests. Continue?",
+      );
+
+      if (!confirmed) return;
+    }
+
+    setNewsTriggersError(null);
+    setNewsTriggersLoading(!refresh);
+    setNewsTriggersRefreshing(refresh);
+
+    try {
+      const res = await fetch(
+        refresh ? "/api/news-triggers?refresh=1" : "/api/news-triggers",
+        { cache: "no-store" },
+      );
+
+      const data = (await res.json()) as NewsTriggerResponse;
+
+      if (!res.ok || data.error) {
+        throw new Error(data.error ?? `News trigger request failed (${res.status})`);
+      }
+
+      setNewsTriggers(data.opportunities ?? []);
+      setIgnoredNewsTriggers(data.ignored ?? []);
+      setNewsTriggerCounts(data.counts ?? null);
+      setNewsTriggerCache(data.cache ?? null);
+      setNewsTriggersLoaded(true);
+    } catch (err) {
+      setNewsTriggersError(
+        err instanceof Error ? err.message : "Failed to load news triggers",
+      );
+    } finally {
+      setNewsTriggersLoading(false);
+      setNewsTriggersRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (workspace === "news" && !newsTriggersLoaded && !newsTriggersLoading) {
+      loadNewsTriggers(false);
+    }
+  }, [workspace, newsTriggersLoaded, newsTriggersLoading, loadNewsTriggers]);
 
   const refreshCredits = useCallback(async () => {
     try {
@@ -572,6 +707,48 @@ export default function Dashboard() {
 
   const busy = stage === "searching" || stage === "enriching";
 
+  function handleGenerateOutreachFromNews(trigger: NewsTrigger) {
+    const companyName = trigger.score.company?.trim();
+
+    if (!companyName) {
+      setNewsTriggersError(
+        "This article does not have a clear company to generate outreach for.",
+      );
+      return;
+    }
+
+    const capabilities = trigger.score.vonciergeCapabilities.length
+      ? trigger.score.vonciergeCapabilities.join(", ")
+      : "None specifically identified";
+
+    const newsContext = [
+      "This campaign was triggered by a recent news article.",
+      "",
+      `News headline: ${trigger.title}`,
+      `Source: ${trigger.domain}`,
+      `Published: ${formatNewsTriggerDate(trigger.published)}`,
+      `Article URL: ${trigger.url}`,
+      "",
+      `Why this matters for Voncierge: ${trigger.score.whyRelevant}`,
+      "",
+      `Suggested outreach angle: ${trigger.score.suggestedOutreachAngle}`,
+      "",
+      `Relevant Voncierge capabilities: ${capabilities}`,
+      "",
+      "Use this news event as the timely reason for reaching out. Do not invent facts beyond the supplied article context. Keep the outreach grounded in the event and Voncierge's approved playbook.",
+    ].join("\n");
+
+    setOutreachPrefill({
+      requestId: Date.now(),
+      company: companyName,
+      industry: trigger.score.industry || "",
+      context: newsContext,
+      autoGenerate: true,
+    });
+
+    setWorkspace("outreach");
+  }
+
   return (
     <div className="shell">
       <header className="product-hero">
@@ -628,6 +805,15 @@ export default function Dashboard() {
             <span className="workspace-tab-number">02</span>
             ✦ Outreach Studio
           </button>
+
+          <button
+            type="button"
+            className={workspace === "news" ? "active" : ""}
+            onClick={() => setWorkspace("news")}
+          >
+            <span className="workspace-tab-number">03</span>
+            ✦ News Triggers
+          </button>
         </nav>
       </header>
 
@@ -644,7 +830,257 @@ export default function Dashboard() {
             </p>
           </div>
 
-          <OutreachGenerator />
+          <OutreachGenerator initialRequest={outreachPrefill} />
+        </div>
+      )}
+
+      {workspace === "news" && (
+        <div className="workspace-view news-triggers-workspace">
+          <div className="workspace-intro news-triggers-intro">
+            <div>
+              <span className="workspace-kicker">NEWS TRIGGERS</span>
+              <h2>Find the reason to reach out now.</h2>
+              <p>
+                English-language business news from approved sources, ranked by
+                how actionable each story is for Voncierge.
+              </p>
+            </div>
+
+            <div className="news-trigger-toolbar">
+              {newsTriggerCache?.scoredAt && (
+                <span className="small muted">
+                  Scored {formatNewsTriggerDate(newsTriggerCache.scoredAt)}
+                </span>
+              )}
+
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => loadNewsTriggers(true)}
+                disabled={newsTriggersRefreshing || newsTriggersLoading}
+                title="Fetches fresh Currents articles and reruns OpenAI scoring"
+              >
+                {newsTriggersRefreshing ? (
+                  <>
+                    <span className="spinner" />
+                    Refreshing…
+                  </>
+                ) : (
+                  "Refresh news"
+                )}
+              </button>
+            </div>
+          </div>
+
+          {newsTriggersError && (
+            <div className="notice error">
+              <AlertCircle size={16} />
+              <div>{newsTriggersError}</div>
+            </div>
+          )}
+
+          {newsTriggersLoading && (
+            <section className="panel news-trigger-loading" aria-live="polite">
+              <div className="news-trigger-loading-copy">
+                <span className="spinner" />
+                Loading saved news intelligence…
+              </div>
+            </section>
+          )}
+
+          {!newsTriggersLoading && newsTriggersLoaded && newsTriggerCounts && (
+            <>
+              <div className="news-trigger-summary">
+                <div className="news-trigger-stat">
+                  <span>Opportunities</span>
+                  <strong>{newsTriggerCounts.opportunities}</strong>
+                </div>
+                <div className="news-trigger-stat">
+                  <span>Articles scored</span>
+                  <strong>{newsTriggerCounts.scored}</strong>
+                </div>
+                <div className="news-trigger-stat">
+                  <span>Filtered out</span>
+                  <strong>{newsTriggerCounts.ignored}</strong>
+                </div>
+                <div className="news-trigger-stat">
+                  <span>Data source</span>
+                  <strong>Cached</strong>
+                </div>
+              </div>
+
+              {newsTriggers.length === 0 ? (
+                <section className="panel">
+                  <div className="empty">
+                    <Info size={28} />
+                    <h3>No strong triggers right now</h3>
+                    <p>
+                      The saved articles were scored, but none crossed the
+                      70-point review threshold.
+                    </p>
+                  </div>
+                </section>
+              ) : (
+                <div className="news-trigger-grid">
+                  {newsTriggers.map((trigger) => {
+                    const score = trigger.score.relevanceScore;
+                    const scoreBand =
+                      score >= 85 ? "high" : score >= 70 ? "medium" : "low";
+
+                    return (
+                      <article
+                        className="news-trigger-card"
+                        data-score-band={scoreBand}
+                        key={trigger.id}
+                      >
+                        <div className="news-trigger-card-top">
+                          <div className="news-trigger-identity">
+                            <div className="news-trigger-company-row">
+                              <span className={`news-score-badge ${scoreBand}`}>
+                                {score}
+                              </span>
+
+                              <div>
+                                <h3>{trigger.score.company || "Potential opportunity"}</h3>
+                                <div className="news-trigger-meta">
+                                  {trigger.score.industry && (
+                                    <span>{trigger.score.industry}</span>
+                                  )}
+                                  <span>{trigger.domain}</span>
+                                  <span>{formatNewsTriggerDate(trigger.published)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 7,
+                            }}
+                          >
+                            {trigger.isNew && (
+                              <span className="news-new-pill">
+                                ✦ New
+                              </span>
+                            )}
+
+                            <span
+                              className={`trigger-action-pill ${scoreBand}`}
+                            >
+                              {trigger.score.recommendedAction ===
+                              "generate_outreach"
+                                ? "High relevance"
+                                : "Review"}
+                            </span>
+                          </div>
+                        </div>
+
+                        <a
+                          className="news-trigger-headline"
+                          href={trigger.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {trigger.title}
+                        </a>
+
+                        <p className="news-trigger-description">
+                          {trigger.description}
+                        </p>
+
+                        <div className="news-trigger-analysis">
+                          <div className="news-trigger-analysis-block">
+                            <span className="news-trigger-label">WHY THIS MATTERS</span>
+                            <p>{trigger.score.whyRelevant}</p>
+                          </div>
+
+                          <div className="news-trigger-analysis-block">
+                            <span className="news-trigger-label">SUGGESTED ANGLE</span>
+                            <p>{trigger.score.suggestedOutreachAngle}</p>
+                          </div>
+                        </div>
+
+                        {trigger.score.vonciergeCapabilities.length > 0 && (
+                          <div className="news-capability-list">
+                            {trigger.score.vonciergeCapabilities.map((capability) => (
+                              <span className="news-capability-chip" key={capability}>
+                                {capability}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        <div className="news-trigger-actions">
+                          <a
+                            className="news-read-link"
+                            href={trigger.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            Read article ↗
+                          </a>
+
+                          <button
+                            type="button"
+                            onClick={() => handleGenerateOutreachFromNews(trigger)}
+                            disabled={!trigger.score.company}
+                            title={
+                              trigger.score.company
+                                ? "Generate a company-specific sequence from this news trigger"
+                                : "No clear company was identified for this article"
+                            }
+                          >
+                            <Mail size={15} />
+                            Generate outreach
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+
+              {ignoredNewsTriggers.length > 0 && (
+                <div className="ignored-news-section">
+                  <button
+                    type="button"
+                    className="ghost ignored-news-toggle"
+                    onClick={() => setShowIgnoredNews((current) => !current)}
+                  >
+                    {showIgnoredNews ? "Hide" : "Show"} {ignoredNewsTriggers.length} filtered
+                    article{ignoredNewsTriggers.length === 1 ? "" : "s"}
+                  </button>
+
+                  {showIgnoredNews && (
+                    <div className="ignored-news-list">
+                      {ignoredNewsTriggers.map((trigger) => (
+                        <div className="ignored-news-row" key={trigger.id}>
+                          <span className="ignored-news-score">
+                            {trigger.score.relevanceScore}
+                          </span>
+
+                          <div className="ignored-news-copy">
+                            <a
+                              href={trigger.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              {trigger.title}
+                            </a>
+                            <p>{trigger.score.whyRelevant}</p>
+                          </div>
+
+                          <span className="small muted">{trigger.domain}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 

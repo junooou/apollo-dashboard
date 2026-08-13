@@ -6,7 +6,7 @@ import type { RunSummary, ScoredCandidate } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 800;
+export const maxDuration = 300;
 
 /**
  * Stage 3: enrichment. THIS SPENDS CREDITS. Only ever called with the exact

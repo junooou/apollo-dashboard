@@ -1,12 +1,23 @@
 # Apollo Lead Sourcing Dashboard
 
-A local web app that turns the manual Apollo sourcing workflow into a repeatable
-tool: search a company, review who the filter picked, approve the shortlist, and
-get a CSV in the same format as every file already in `../Apollo Lead Generation/`.
+A local web app, branded on-screen as **Outbound Intelligence**, that turns the
+manual Apollo sourcing workflow into a repeatable tool: search a company, review
+who the filter picked, approve the shortlist, and get a CSV in the same format
+as every file already in `../Apollo Lead Generation/`. A second tab, **Outreach
+Studio**, turns a company or industry into a multi-email outreach sequence and
+can save it straight to a Google Doc.
 
 The rules it applies come from `../Apollo Lead Generation/context.md` — the
 priority roles, the exclusions, the credit policy, and the lessons from previous
 sourcing runs.
+
+**New here?** Read **[`USER_MANUAL.md`](./USER_MANUAL.md)** for a non-technical,
+step-by-step walkthrough of the whole app — no coding knowledge needed. Developers
+and AI assistants should read **[`CODEBASE_GUIDE.md`](./CODEBASE_GUIDE.md)** for a
+plain-language map of the folder structure, styling, and wording conventions, and
+**[`AGENTS.md`](./AGENTS.md)** for the full technical reference. Both `USER_MANUAL.md`
+and `CODEBASE_GUIDE.md` are living documents — update them whenever you ship a
+feature that changes what's described in them.
 
 ## Setup
 
@@ -47,7 +58,9 @@ the full walkthrough, and `npm run check-drive` to verify it once configured.
 
 ## How a run works
 
-Three stages, with a deliberate gate in the middle.
+The app has two tabs: **Lead Sourcing** (below) and **Outreach Studio** (see
+[Outreach email generator](#outreach-email-generator)). Lead Sourcing runs in
+three stages, with a deliberate gate in the middle.
 
 **1. Search — free.** Enter a company name or domain. Apollo's people-search
 endpoint costs **zero credits** and returns no emails, so the net is cast wide.

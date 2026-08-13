@@ -10,6 +10,7 @@ import {
 } from "@/lib/job-signal-scoring";
 import { outputDir } from "@/lib/csv";
 import { loadSettings } from "@/lib/settings";
+import { warmSheetsIndex } from "@/lib/sheets";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,7 +68,34 @@ async function loadTargetCompanyNames(): Promise<string[]> {
   }
 }
 
-function buildResponse(history: JobSignalHistory) {
+/**
+ * Every company name collated across the "Voncierge Outreach" Google Sheets
+ * — what `isNewLead` checks against, distinct from `loadTargetCompanyNames`'s
+ * local CSV folder. Deliberately lets a genuine warm-up failure (bad
+ * credentials, unreachable folder) THROW rather than silently returning an
+ * empty list: an empty list would make every single company look like a
+ * "new lead", which is worse than surfacing the error and blocking the
+ * refresh — the whole point of this feature is that the flag is only
+ * trustworthy once Sheets has actually loaded.
+ *
+ * Returns `null` (not an error) when Sheets export isn't configured at all
+ * (no GOOGLE_PARENT_FOLDER_ID) — that's an intentionally-off feature, not a
+ * failure, and callers use `null` to mean "unknown" rather than "confirmed
+ * new".
+ *
+ * In practice this reuses the SAME in-memory cache app/page.tsx's mount-time
+ * call to /api/sheets-index already warms (see lib/sheets.ts) — it doesn't
+ * trigger a second scan once that's landed.
+ */
+async function loadSheetsCompanyNames(): Promise<string[] | null> {
+  const folderId = process.env.GOOGLE_PARENT_FOLDER_ID?.trim();
+  if (!folderId) return null;
+
+  const index = await warmSheetsIndex(folderId);
+  return [...new Set(index.contacts.map((c) => c.company).filter(Boolean))];
+}
+
+function buildResponse(history: JobSignalHistory, sheetsConfigured: boolean) {
   const latestRefreshAt = history.lastRefreshAt;
 
   const results: JobSignalResult[] = history.entries.map((entry) => ({
@@ -99,8 +127,13 @@ function buildResponse(history: JobSignalHistory) {
       watching: watching.length,
       newListings: newListings.length,
       targetCompanyHits: results.filter((r) => r.score.isTargetCompany).length,
+      // Companies not collated anywhere across the Voncierge Outreach Google
+      // Sheets — see isNewLead. Only meaningful once Sheets export is
+      // configured, hence the separate sheetsConfigured flag below.
+      newLeads: results.filter((r) => r.score.isNewLead === true).length,
     },
     cache: { lastRefreshAt: history.lastRefreshAt },
+    sheetsConfigured,
   };
 }
 
@@ -113,6 +146,13 @@ function buildResponse(history: JobSignalHistory) {
  */
 async function refreshJobSignals(history: JobSignalHistory): Promise<JobSignalHistory> {
   const refreshAt = new Date().toISOString();
+
+  // Sheets is loaded FIRST and awaited directly (not folded into the
+  // Promise.all below) so a Sheets failure surfaces clearly rather than
+  // racing ambiguously against the other loads — this feed hinges on
+  // knowing which companies are already in Sheets before it can label
+  // anything a "new lead".
+  const sheetsCompanyNames = await loadSheetsCompanyNames();
 
   const [candidates, targetCompanyNames, settings] = await Promise.all([
     fetchJobSignalCandidates(),
@@ -132,7 +172,7 @@ async function refreshJobSignals(history: JobSignalHistory): Promise<JobSignalHi
     // as an excluded Apollo candidate.
     if (!evaluateJobSignalRelevance(listing, settings).relevant) continue;
 
-    const score = scoreJobSignal(listing, targetCompanyNames);
+    const score = scoreJobSignal(listing, targetCompanyNames, sheetsCompanyNames);
     const existing = existingByUuid.get(listing.uuid);
 
     nextEntries.push({
@@ -158,7 +198,8 @@ export async function GET() {
   try {
     const history = await refreshJobSignals(await readHistory());
     await writeHistory(history);
-    return NextResponse.json(buildResponse(history));
+    const sheetsConfigured = Boolean(process.env.GOOGLE_PARENT_FOLDER_ID?.trim());
+    return NextResponse.json(buildResponse(history, sheetsConfigured));
   } catch (err) {
     console.error("Job signal pipeline failed:", err);
     const message = err instanceof Error ? err.message : "Job signal pipeline failed";

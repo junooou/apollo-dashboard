@@ -126,6 +126,10 @@ function formatNewsTriggerDate(value: string) {
 type JobSignalScore = {
   relevanceScore: number;
   isTargetCompany: boolean;
+  /** true = confirmed not collated anywhere in the Voncierge Outreach Google
+   *  Sheets; false = found there; null = Sheets export isn't configured, so
+   *  this can't be determined. */
+  isNewLead: boolean | null;
   whyRelevant: string;
   suggestedOutreachAngle: string;
   recommendedAction: "generate_outreach" | "watch";
@@ -159,8 +163,10 @@ type JobSignalResponse = {
     watching: number;
     newListings: number;
     targetCompanyHits: number;
+    newLeads: number;
   };
   cache?: { lastRefreshAt: string | null };
+  sheetsConfigured?: boolean;
   error?: string;
 };
 
@@ -285,10 +291,17 @@ export default function Dashboard() {
   const [watchingJobSignals, setWatchingJobSignals] = useState<JobSignal[]>([]);
   const [jobSignalCounts, setJobSignalCounts] = useState<JobSignalResponse["counts"] | null>(null);
   const [jobSignalCache, setJobSignalCache] = useState<JobSignalResponse["cache"] | null>(null);
+  const [jobSignalsSheetsConfigured, setJobSignalsSheetsConfigured] = useState<boolean | null>(
+    null,
+  );
   const [jobSignalsLoading, setJobSignalsLoading] = useState(true);
   const [jobSignalsLoaded, setJobSignalsLoaded] = useState(false);
   const [jobSignalsError, setJobSignalsError] = useState<string | null>(null);
   const [showWatchingJobSignals, setShowWatchingJobSignals] = useState(false);
+  /** "New companies only" toggle beside Refresh — narrows the feed to
+   *  listings at companies not collated anywhere in the Voncierge Outreach
+   *  Google Sheets (score.isNewLead). */
+  const [newLeadsOnly, setNewLeadsOnly] = useState(false);
 
   const loadJobSignals = useCallback(async () => {
     setJobSignalsLoading(true);
@@ -303,6 +316,7 @@ export default function Dashboard() {
       setWatchingJobSignals(data.watching ?? []);
       setJobSignalCounts(data.counts ?? null);
       setJobSignalCache(data.cache ?? null);
+      setJobSignalsSheetsConfigured(data.sheetsConfigured ?? null);
       setJobSignalsLoaded(true);
     } catch (err) {
       setJobSignalsError(err instanceof Error ? err.message : "Failed to load job signals");
@@ -310,13 +324,6 @@ export default function Dashboard() {
       setJobSignalsLoading(false);
     }
   }, []);
-
-  // Fires once when the app loads, and again on every browser refresh —
-  // deliberately not gated behind opening the tab, unlike News Triggers,
-  // because there's no cost or credential to protect here.
-  useEffect(() => {
-    loadJobSignals();
-  }, [loadJobSignals]);
 
   function handleGenerateOutreachFromJobSignal(signal: JobSignal) {
     const jobContext = [
@@ -510,6 +517,24 @@ export default function Dashboard() {
       setSheetsIndexLoading(false);
     }
   }, []);
+
+  /**
+   * Job Signals' "new lead" flag is only trustworthy once the Voncierge
+   * Outreach Sheets index has actually loaded — an empty/stale index would
+   * make every company look new. So the very first job-signals fetch waits
+   * for the Sheets index to settle (loaded OR confirmed-not-configured)
+   * before firing, and doesn't fire at all if Sheets is configured but
+   * errored — see the blocking notice in the Job Signals tab below.
+   * Refresh-button clicks after that first load aren't re-gated: the
+   * `/api/job-signals` route re-checks Sheets itself on every call anyway.
+   */
+  const [jobSignalsGateCleared, setJobSignalsGateCleared] = useState(false);
+  useEffect(() => {
+    if (jobSignalsGateCleared || sheetsIndexLoading || !sheetsIndexStatus) return;
+    if (sheetsIndexStatus.configured !== false && sheetsIndexStatus.error) return;
+    setJobSignalsGateCleared(true);
+    loadJobSignals();
+  }, [jobSignalsGateCleared, sheetsIndexLoading, sheetsIndexStatus, loadJobSignals]);
 
   useEffect(() => {
     refreshCredits();
@@ -934,6 +959,24 @@ export default function Dashboard() {
     setWorkspace("outreach");
   }
 
+  // "New companies only" — narrows Job Signals to listings whose company
+  // isn't collated anywhere in the Voncierge Outreach Google Sheets. Purely
+  // a client-side view filter; the underlying score.isNewLead flag is
+  // already computed server-side against the loaded Sheets index.
+  const visibleJobSignals = useMemo(
+    () => (newLeadsOnly ? jobSignals.filter((s) => s.score.isNewLead === true) : jobSignals),
+    [jobSignals, newLeadsOnly],
+  );
+  const visibleWatchingJobSignals = useMemo(
+    () =>
+      newLeadsOnly ? watchingJobSignals.filter((s) => s.score.isNewLead === true) : watchingJobSignals,
+    [watchingJobSignals, newLeadsOnly],
+  );
+  const sheetsBlockedError =
+    sheetsIndexStatus?.configured !== false && Boolean(sheetsIndexStatus?.error);
+  const waitingOnSheetsForJobSignals =
+    !jobSignalsGateCleared && !sheetsBlockedError;
+
   return (
     <div className="shell">
       <header className="product-hero">
@@ -1354,11 +1397,27 @@ export default function Dashboard() {
                 </span>
               )}
 
+              {jobSignalsSheetsConfigured !== false && (
+                <label
+                  className="inline-check"
+                  title="Only show listings at companies not collated anywhere in the Voncierge Outreach Google Sheets"
+                >
+                  <input
+                    type="checkbox"
+                    checked={newLeadsOnly}
+                    onChange={(e) => setNewLeadsOnly(e.target.checked)}
+                    disabled={waitingOnSheetsForJobSignals || sheetsBlockedError}
+                  />
+                  New companies only
+                  {typeof jobSignalCounts?.newLeads === "number" && ` (${jobSignalCounts.newLeads})`}
+                </label>
+              )}
+
               <button
                 type="button"
                 className="secondary"
                 onClick={() => loadJobSignals()}
-                disabled={jobSignalsLoading}
+                disabled={jobSignalsLoading || waitingOnSheetsForJobSignals || sheetsBlockedError}
                 title="Fetches the latest listings from MyCareersFuture — free, no confirmation needed"
               >
                 {jobSignalsLoading ? (
@@ -1380,13 +1439,35 @@ export default function Dashboard() {
             </div>
           )}
 
-          {jobSignalsLoading && !jobSignalsLoaded && (
+          {sheetsBlockedError ? (
+            <section className="panel news-trigger-loading" aria-live="polite">
+              <div className="news-trigger-loading-copy">
+                <AlertCircle size={16} />
+                Google Sheets failed to load ({sheetsIndexStatus?.error}) — Job Signals stays
+                paused until it does, since &quot;new company&quot; only means something once
+                Sheets has actually loaded.
+              </div>
+              <button type="button" className="secondary" onClick={() => refreshSheetsIndex(true)}>
+                Retry Google Sheets
+              </button>
+            </section>
+          ) : waitingOnSheetsForJobSignals ? (
             <section className="panel news-trigger-loading" aria-live="polite">
               <div className="news-trigger-loading-copy">
                 <span className="spinner" />
-                Fetching live listings from MyCareersFuture…
+                Loading Voncierge Outreach from Google Sheets before fetching job signals…
               </div>
             </section>
+          ) : (
+            jobSignalsLoading &&
+            !jobSignalsLoaded && (
+              <section className="panel news-trigger-loading" aria-live="polite">
+                <div className="news-trigger-loading-copy">
+                  <span className="spinner" />
+                  Fetching live listings from MyCareersFuture…
+                </div>
+              </section>
+            )
           )}
 
           {jobSignalsLoaded && jobSignalCounts && (
@@ -1400,6 +1481,12 @@ export default function Dashboard() {
                   <span>Already in pipeline</span>
                   <strong>{jobSignalCounts.targetCompanyHits}</strong>
                 </div>
+                {jobSignalsSheetsConfigured !== false && (
+                  <div className="news-trigger-stat">
+                    <span>New companies</span>
+                    <strong>{jobSignalCounts.newLeads}</strong>
+                  </div>
+                )}
                 <div className="news-trigger-stat">
                   <span>Listings scanned</span>
                   <strong>{jobSignalCounts.totalListings}</strong>
@@ -1410,20 +1497,23 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {jobSignals.length === 0 ? (
+              {visibleJobSignals.length === 0 ? (
                 <section className="panel">
                   <div className="empty">
                     <Info size={28} />
-                    <h3>No strong signals right now</h3>
+                    <h3>
+                      {newLeadsOnly ? "No new companies right now" : "No strong signals right now"}
+                    </h3>
                     <p>
-                      {jobSignalCounts.totalListings} listings were scanned, but none
-                      crossed the 70-point review threshold this refresh.
+                      {newLeadsOnly
+                        ? "Every opportunity this refresh is already collated somewhere in Google Sheets — turn off “New companies only” to see the full list."
+                        : `${jobSignalCounts.totalListings} listings were scanned, but none crossed the 70-point review threshold this refresh.`}
                     </p>
                   </div>
                 </section>
               ) : (
                 <div className="news-trigger-grid">
-                  {jobSignals.map((signal) => {
+                  {visibleJobSignals.map((signal) => {
                     const score = signal.score.relevanceScore;
                     const scoreBand = score >= 85 ? "high" : score >= 70 ? "medium" : "low";
 
@@ -1451,8 +1541,17 @@ export default function Dashboard() {
 
                           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                             {signal.isNew && <span className="news-new-pill">✦ New</span>}
-                            {signal.score.isTargetCompany && (
-                              <span className={`trigger-action-pill high`}>In pipeline</span>
+                            {signal.score.isTargetCompany ? (
+                              <span className="trigger-action-pill high">In pipeline</span>
+                            ) : (
+                              signal.score.isNewLead && (
+                                <span
+                                  className="trigger-action-pill medium"
+                                  title="Not collated anywhere in the Voncierge Outreach Google Sheets"
+                                >
+                                  New Lead
+                                </span>
+                              )
                             )}
                           </div>
                         </div>
@@ -1502,20 +1601,20 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {watchingJobSignals.length > 0 && (
+              {visibleWatchingJobSignals.length > 0 && (
                 <div className="ignored-news-section">
                   <button
                     type="button"
                     className="ghost ignored-news-toggle"
                     onClick={() => setShowWatchingJobSignals((current) => !current)}
                   >
-                    {showWatchingJobSignals ? "Hide" : "Show"} {watchingJobSignals.length} below-threshold
-                    listing{watchingJobSignals.length === 1 ? "" : "s"}
+                    {showWatchingJobSignals ? "Hide" : "Show"} {visibleWatchingJobSignals.length}{" "}
+                    below-threshold listing{visibleWatchingJobSignals.length === 1 ? "" : "s"}
                   </button>
 
                   {showWatchingJobSignals && (
                     <div className="ignored-news-list">
-                      {watchingJobSignals.map((signal) => (
+                      {visibleWatchingJobSignals.map((signal) => (
                         <div className="ignored-news-row" key={signal.uuid}>
                           <span className="ignored-news-score">{signal.score.relevanceScore}</span>
 

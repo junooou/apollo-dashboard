@@ -23,6 +23,13 @@ import type { Settings } from "./types";
 export type ScoredJobSignal = {
   relevanceScore: number;
   isTargetCompany: boolean;
+  /** True when this company's name doesn't fuzzy-match any company already
+   *  collated across the "Voncierge Outreach" Google Sheets — i.e. a
+   *  genuinely new lead, not just "not in the local CSV folder" (that's
+   *  what isTargetCompany checks). Null when the Sheets index isn't
+   *  configured or hasn't loaded, so callers can tell "confirmed new" apart
+   *  from "unknown" rather than defaulting unknowns to true. */
+  isNewLead: boolean | null;
   whyRelevant: string;
   suggestedOutreachAngle: string;
   recommendedAction: "generate_outreach" | "watch";
@@ -185,16 +192,25 @@ export function isTargetCompany(companyName: string, targetCompanyNames: string[
 /**
  * Score = 50 base (matched one of our target departments at all) + up to 15
  * for seniority + up to 10 for freshness + 30 if the company is already in
- * the sourcing pipeline. A senior, fresh role at an already-tracked company
- * caps at 100; a junior, older role at an unknown company can land as low
- * as 50 (filtered into "ignored" below the 70 threshold, same convention as
- * News Triggers).
+ * the sourcing pipeline (local CSV shortlist, see isTargetCompany). A senior,
+ * fresh role at an already-tracked company caps at 100; a junior, older role
+ * at an unknown company can land as low as 50 (filtered into "ignored" below
+ * the 70 threshold, same convention as News Triggers).
+ *
+ * `sheetsCompanyNames` is a separate, independent check against the actual
+ * "Voncierge Outreach" Google Sheets contents (not the local CSV folder) —
+ * it drives `isNewLead`, not the score itself. Pass `null` when the Sheets
+ * index isn't configured/available so callers can distinguish "confirmed not
+ * in Sheets" from "we don't know".
  */
 export function scoreJobSignal(
   listing: JobSignalListing,
   targetCompanyNames: string[],
+  sheetsCompanyNames: string[] | null,
 ): ScoredJobSignal {
   const targetMatch = isTargetCompany(listing.company.name, targetCompanyNames);
+  const isNewLead =
+    sheetsCompanyNames === null ? null : !isTargetCompany(listing.company.name, sheetsCompanyNames);
 
   let score = 50;
   score += seniorityBonus(listing);
@@ -204,7 +220,9 @@ export function scoreJobSignal(
 
   const whyRelevant = targetMatch
     ? `${listing.company.name} — already in the sourcing pipeline — posted a new ${listing.department} role.`
-    : `New ${listing.department} role posted at ${listing.company.name}, not yet in the sourcing pipeline.`;
+    : isNewLead
+      ? `New ${listing.department} role at ${listing.company.name} — not collated in Google Sheets yet, a genuinely new lead.`
+      : `New ${listing.department} role posted at ${listing.company.name}, not yet in the sourcing pipeline.`;
 
   const suggestedOutreachAngle = targetMatch
     ? `This is a live hiring signal at a company you already have contacts for — reference the new role or team as a timely, specific reason to reach out now rather than a cold restart.`
@@ -213,6 +231,7 @@ export function scoreJobSignal(
   return {
     relevanceScore: score,
     isTargetCompany: targetMatch,
+    isNewLead,
     whyRelevant,
     suggestedOutreachAngle,
     recommendedAction: score >= 70 ? "generate_outreach" : "watch",

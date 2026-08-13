@@ -83,7 +83,7 @@ const HIGH_REVEAL_TITLE_PATTERNS = [
   "chief",
 ];
 
-function normalise(text: string): string {
+export function normalise(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9\s,&-]/g, " ").replace(/\s+/g, " ").trim();
 }
 
@@ -94,14 +94,14 @@ function normalise(text: string): string {
  * A trailing "s" is tolerated so "tenant solution" matches the real-world title
  * "Digital Tenant Solutions".
  */
-function containsTerm(haystack: string, term: string): boolean {
+export function containsTerm(haystack: string, term: string): boolean {
   const t = normalise(term);
   if (!t) return false;
   const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(^|[^a-z0-9])${escaped}s?([^a-z0-9]|$)`, "i").test(haystack);
 }
 
-function matchAll(haystack: string, terms: string[]): string[] {
+export function matchAll(haystack: string, terms: string[]): string[] {
   return terms.filter((t) => containsTerm(haystack, t));
 }
 

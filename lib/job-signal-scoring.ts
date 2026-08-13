@@ -15,7 +15,10 @@
  * nothing here calls a model.
  */
 
+import { matchAll, normalise } from "./filter";
+import { departmentById } from "./taxonomy";
 import type { JobSignalListing } from "./mycareersfuture";
+import type { Settings } from "./types";
 
 export type ScoredJobSignal = {
   relevanceScore: number;
@@ -23,6 +26,12 @@ export type ScoredJobSignal = {
   whyRelevant: string;
   suggestedOutreachAngle: string;
   recommendedAction: "generate_outreach" | "watch";
+};
+
+export type JobSignalRelevance = {
+  relevant: boolean;
+  reason: string;
+  matchedInclude: string[];
 };
 
 /** MyCareersFuture's coarse seniority bands — verified live (2026-08-13)
@@ -70,6 +79,86 @@ function freshnessBonus(postedDate: string): number {
   if (ageDays <= 14) return 5;
   return 0; // Older postings naturally fall out of the "new signal" tier —
   // this is meant to decay, not stay pinned at a fixed score forever.
+}
+
+/**
+ * MyCareersFuture's search is a single sharp keyword per department (see
+ * lib/mycareersfuture.ts), so a "Customer Experience" query happily returns
+ * things like "Customer Experience Coordinator (Finance)" or a junior
+ * frontline role — matches the department, but not actually who
+ * `Apollo Lead Generation/context.md` wants us chasing. This mirrors
+ * lib/filter.ts's exclude / conditional-exclude / negative-signal sieve
+ * against the SAME Settings-driven keyword lists the Apollo people search
+ * uses, so the two pipelines can't drift into disagreeing about what counts
+ * as relevant.
+ */
+export function evaluateJobSignalRelevance(
+  listing: JobSignalListing,
+  settings: Pick<
+    Settings,
+    "includeKeywords" | "excludeKeywords" | "conditionalExcludeKeywords" | "negativeSignals"
+  >,
+): JobSignalRelevance {
+  const title = normalise(listing.title);
+  const matchedInclude = matchAll(title, settings.includeKeywords);
+  const matchedExclude = matchAll(title, settings.excludeKeywords);
+  const matchedConditional = matchAll(title, settings.conditionalExcludeKeywords ?? []);
+  const matchedNegative = matchAll(title, settings.negativeSignals ?? []);
+
+  if (matchedExclude.length > 0) {
+    return {
+      relevant: false,
+      reason: `Excluded — title includes "${matchedExclude[0]}"`,
+      matchedInclude,
+    };
+  }
+
+  // context.md: "Wealth management or private banking — unless the role
+  // specifically covers customer experience" / "Project management without
+  // a clear CX, AI or digital-transformation focus".
+  if (matchedConditional.length > 0 && matchedInclude.length === 0) {
+    return {
+      relevant: false,
+      reason: `Excluded — title includes "${matchedConditional[0]}", no CX signal to offset it`,
+      matchedInclude,
+    };
+  }
+
+  if (matchedNegative.length > 0 && matchedInclude.length === 0) {
+    return {
+      relevant: false,
+      reason: `Weak signal — title includes "${matchedNegative[0]}", no CX signal to offset it`,
+      matchedInclude,
+    };
+  }
+
+  if (isJuniorFrontline(listing)) {
+    return {
+      relevant: false,
+      reason: `Junior/frontline customer-service posting (position level: ${listing.positionLevel})`,
+      matchedInclude,
+    };
+  }
+
+  return { relevant: true, reason: "Passed relevance filter", matchedInclude };
+}
+
+/**
+ * context.md: "Junior customer-service or frontline support roles" — drop.
+ * Job Signals has no seniority filter at fetch time (unlike Apollo people
+ * search, which is pre-scoped to manager+), so this has to happen here.
+ * Deliberately scoped to the Customer Service department and to listings
+ * where MyCareersFuture actually returned a position level below our
+ * verified Manager/Senior Executive/Senior Management bands — a missing
+ * positionLevel isn't treated as junior, since that would be guessing.
+ */
+function isJuniorFrontline(listing: JobSignalListing): boolean {
+  if (listing.department !== departmentById("customer_service")?.label) return false;
+  if (titleLooksSenior(listing.title)) return false;
+  if (!listing.positionLevel) return false;
+  if (SENIOR_POSITION_LEVELS.has(listing.positionLevel)) return false;
+  if (MID_POSITION_LEVELS.has(listing.positionLevel)) return false;
+  return true;
 }
 
 /** Loose company-name equality — same idea as lib/sheets.ts's

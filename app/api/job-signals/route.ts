@@ -3,8 +3,13 @@ import fs from "fs/promises";
 import path from "path";
 
 import { fetchJobSignalCandidates, type JobSignalListing } from "@/lib/mycareersfuture";
-import { scoreJobSignal, type ScoredJobSignal } from "@/lib/job-signal-scoring";
+import {
+  evaluateJobSignalRelevance,
+  scoreJobSignal,
+  type ScoredJobSignal,
+} from "@/lib/job-signal-scoring";
 import { outputDir } from "@/lib/csv";
+import { loadSettings } from "@/lib/settings";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -109,15 +114,24 @@ function buildResponse(history: JobSignalHistory) {
 async function refreshJobSignals(history: JobSignalHistory): Promise<JobSignalHistory> {
   const refreshAt = new Date().toISOString();
 
-  const [candidates, targetCompanyNames] = await Promise.all([
+  const [candidates, targetCompanyNames, settings] = await Promise.all([
     fetchJobSignalCandidates(),
     loadTargetCompanyNames(),
+    loadSettings(),
   ]);
 
   const existingByUuid = new Map(history.entries.map((e) => [e.listing.uuid, e]));
   const nextEntries: JobSignalHistoryEntry[] = [];
 
   for (const listing of candidates) {
+    // Same exclude / conditional-exclude / negative-signal rules as the
+    // Apollo people search (Apollo Lead Generation/context.md), plus a
+    // junior-frontline check this feed needs and the people search doesn't
+    // (that pipeline is already pre-scoped to manager+ seniority). A listing
+    // that fails this check never enters history — same hard-drop semantics
+    // as an excluded Apollo candidate.
+    if (!evaluateJobSignalRelevance(listing, settings).relevant) continue;
+
     const score = scoreJobSignal(listing, targetCompanyNames);
     const existing = existingByUuid.get(listing.uuid);
 

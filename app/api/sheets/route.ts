@@ -4,7 +4,9 @@ import {
   createSpreadsheet,
   findContactsForCompany,
   invalidateSheetsIndex,
+  listCompaniesFromIndex,
   listSpreadsheetsInFolder,
+  markLinkedinContactSent,
   readRange,
   updateRange,
 } from "@/lib/sheets";
@@ -17,12 +19,25 @@ export const dynamic = "force-dynamic";
 
 /**
  * GET /api/sheets?list=1                        -> spreadsheets in GOOGLE_PARENT_FOLDER_ID
+ * GET /api/sheets?listCompanies=1                -> distinct company names across the folder
  * GET /api/sheets?checkCompany=OCBC              -> existing contacts (full detail) by company, across the folder
  * GET /api/sheets?spreadsheetId=...&range=A1:Z99 -> raw cell values
  */
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
+
+    if (searchParams.has("listCompanies")) {
+      const folderId = process.env.GOOGLE_PARENT_FOLDER_ID?.trim();
+      if (!folderId) {
+        return NextResponse.json(
+          { error: "GOOGLE_PARENT_FOLDER_ID is not set in .env.local" },
+          { status: 400 },
+        );
+      }
+      const companies = await listCompaniesFromIndex(folderId);
+      return NextResponse.json({ companies });
+    }
 
     if (searchParams.has("list")) {
       const folderId = process.env.GOOGLE_PARENT_FOLDER_ID?.trim();
@@ -82,7 +97,7 @@ export async function GET(req: Request) {
 }
 
 type SheetsRequestBody = {
-  mode: "append" | "update" | "create" | "pushContacts";
+  mode: "append" | "update" | "create" | "pushContacts" | "markLinkedinSent";
   spreadsheetId?: string;
   range?: string;
   values?: (string | number)[][];
@@ -90,6 +105,7 @@ type SheetsRequestBody = {
   sheetTitles?: string[];
   shareWithEmail?: string;
   contacts?: EnrichedContact[];
+  rowIndex?: number;
 };
 
 /**
@@ -99,6 +115,11 @@ type SheetsRequestBody = {
  * mode: "pushContacts" -> append enriched contacts to an EXISTING sheet
  *                         (never overwrites); adds a header row only if the
  *                         sheet is currently empty.
+ * mode: "markLinkedinSent" -> record a manual "I sent this connection
+ *                         request" confirmation for one row: writes
+ *                         linkedin_status/linkedin_sent_at (adding those
+ *                         columns if needed) and shades the linkedin_url
+ *                         cell green.
  */
 export async function POST(req: Request) {
   try {
@@ -166,6 +187,22 @@ export async function POST(req: Request) {
       invalidateSheetsIndex();
 
       return NextResponse.json({ ...result, headerAdded: needsHeader, rowsPushed: rows.length });
+    }
+
+    if (body.mode === "markLinkedinSent") {
+      if (!body.spreadsheetId || !body.rowIndex) {
+        return NextResponse.json(
+          { error: "spreadsheetId and rowIndex are required" },
+          { status: 400 },
+        );
+      }
+
+      const result = await markLinkedinContactSent(body.spreadsheetId, body.rowIndex);
+
+      // The status/date columns and cell shading just changed — refresh on next read.
+      invalidateSheetsIndex();
+
+      return NextResponse.json(result);
     }
 
     if (!body.spreadsheetId || !body.range || !body.values) {

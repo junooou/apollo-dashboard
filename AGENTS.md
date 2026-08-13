@@ -364,6 +364,86 @@ don't exist there. The runtime-guarded import still broke the Edge
 `app/api/sheets-index/route.ts` for the safe way to revisit this (route it
 through `fetch()` instead).
 
+## LinkedIn Drafts (Outreach Studio sub-tab)
+
+A second channel alongside the email `OutreachGenerator`, in
+`app/components/LinkedInDraftGenerator.tsx` — reachable via a segmented
+toggle inside the existing Outreach Studio tab, not a new top-level
+workspace tab. Company picker is `GET /api/sheets?listCompanies=1`, which
+dedupes company names off the already-warmed sheets index — no new Sheets
+calls beyond what `warmSheetsIndex` already does.
+
+**There is no LinkedIn API, official or otherwise, that this app (or any
+third party) can use to send a connection request, or to verify one was
+sent.** LinkedIn's User Agreement prohibits automated messaging/connecting,
+and detection leads to account restrictions or bans — this was a deliberate
+decision after weighing automation tools (PhantomBuster, Dux-Soup, etc.)
+that operate this way anyway. So "Mark as Sent" in the UI is a **trusted
+manual confirmation**, not a verified event — same trust model as the
+Simple-filters paste-from-Claude flow. Do not add a "send" button here; if
+someone asks for one, that's a product decision with real ToS/ban risk
+attached, not a bug to fix.
+
+**Drafts are connection notes, not InMail.** Capped at 200 characters
+(LinkedIn's actual limit for the note sent with a connection request) —
+`prompts/voncierge_linkedin_draft_guidelines.md` is the tone/format
+reference, parallel to the email guide but written for one bespoke message
+per already-known contact rather than a `{firstname}`/`{company}` merge-field
+template. `app/api/generate-linkedin-drafts/route.ts` batches every selected
+contact into one OpenAI call (matched back by a `key` field) rather than one
+call per contact, same cost-shape reasoning as `generate-template`.
+
+**Sheets formatting is a new code path.** Every existing `lib/sheets.ts`
+writer (`appendRows`, `updateRange`) only ever touches cell *values* via the
+`spreadsheets.values.*` endpoints. Shading the `linkedin_url` cell green on
+"Mark as Sent" needed `spreadsheets.batchUpdate`'s `repeatCell` request
+instead, which addresses a sheet by its internal numeric `gid` — not by name
+or tab index — so `getFirstSheetId()` fetches and caches that per
+spreadsheet (`sheets.get`, `fields: sheets.properties(sheetId,index)`,
+picking `index === 0`). Cached for the process lifetime; a tab's gid only
+changes if the tab itself is deleted and recreated, which none of this
+app's flows do.
+
+**Tracking columns are added on demand, per sheet, not part of the fixed CSV
+schema.** `ensureLinkedinTrackingColumns()` reads a sheet's header, and only
+appends `linkedin_status`/`linkedin_sent_at` if that sheet doesn't already
+have them — completely separate from the 10-column schema `lib/csv.ts`'s
+`contactsToRows` writes (see "The CSV schema is fixed" above). This can't
+drift that schema because it only ever extends a sheet's *own* header past
+whatever `pushContacts` already wrote, never rewrites existing columns.
+
+`SheetContact` (from `scanAllContacts`/the warm index) now also carries
+`rowIndex` (1-based, header is row 1) so "Mark as Sent" can target the exact
+row without re-searching, plus `linkedinStatus`/`linkedinSentAt` when a
+sheet already has those columns — this is what lets the UI show "Already
+sent" immediately on loading a company's contacts, before generating
+anything new. It also now carries `seniority`/`location` when a sheet has
+those columns (part of the standard 10-column schema, just previously unread
+by this type) — fed into draft generation as extra personalization inputs.
+
+**Personalization also pulls in signals from elsewhere in the app, at zero
+extra cost.** `lib/linkedin-personalization.ts`'s `findNewsAngle()` and
+`findJobSignalAngle()` are pure reads of `data/news-history.json` and
+`data/job-signals-history.json` — the same on-disk stores
+`app/api/news-triggers/route.ts` and `app/api/job-signals/route.ts` already
+maintain — filtered to the target company (fuzzy match, same rule as
+`lib/sheets.ts`'s `companyNamesMatch`) and gated at `relevanceScore >= 70`,
+reusing the exact bar both of those tabs already use for "worth acting on"
+rather than inventing a third threshold. This makes **zero** new network or
+OpenAI calls; it only surfaces what those tabs already scored. If neither
+history file has a match above the bar, the generator gets `None detected`
+and drafts purely off contact-level fields — this is expected for most
+companies, not a bug.
+
+**A detected signal is deliberately optional, and batches must vary.**
+`app/api/generate-linkedin-drafts/route.ts` passes at most one company-level
+angle alongside every contact in the batch, with an explicit instruction not
+to reuse the same signal-anchored sentence across multiple contacts at the
+same company, and to vary which detail (title/seniority/location/signal)
+anchors each note — otherwise a batch of five contacts at one company would
+read as one templated note with the name swapped, which defeats the point of
+personalizing at all.
+
 ## Company news (`lib/news.ts`)
 
 There is no official free Google News API. This uses the public

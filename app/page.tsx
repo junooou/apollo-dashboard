@@ -6,6 +6,7 @@ import { DeptChip } from "./components/DeptChip";
 import OutreachGenerator, {
   type OutreachPrefill,
 } from "./components/OutreachGenerator";
+import LinkedInDraftGenerator from "./components/LinkedInDraftGenerator";
 import {
   AlertCircle,
   AlertTriangle,
@@ -196,6 +197,7 @@ type Stage = "idle" | "searching" | "review" | "enriching" | "done";
 export default function Dashboard() {
   const [workspace, setWorkspace] = useState<"leads" | "outreach" | "news" | "jobs">("leads");
   const [outreachPrefill, setOutreachPrefill] = useState<OutreachPrefill | null>(null);
+  const [outreachChannel, setOutreachChannel] = useState<"email" | "linkedin">("email");
   const [company, setCompany] = useState("");
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -1133,7 +1135,28 @@ export default function Dashboard() {
             </p>
           </div>
 
-          <OutreachGenerator initialRequest={outreachPrefill} />
+          <div className="row" style={{ gap: 8, marginBottom: 20 }}>
+            <button
+              type="button"
+              className={outreachChannel === "email" ? "" : "secondary"}
+              onClick={() => setOutreachChannel("email")}
+            >
+              Email Campaigns
+            </button>
+            <button
+              type="button"
+              className={outreachChannel === "linkedin" ? "" : "secondary"}
+              onClick={() => setOutreachChannel("linkedin")}
+            >
+              LinkedIn Drafts
+            </button>
+          </div>
+
+          {outreachChannel === "email" ? (
+            <OutreachGenerator initialRequest={outreachPrefill} />
+          ) : (
+            <LinkedInDraftGenerator />
+          )}
         </div>
       )}
 

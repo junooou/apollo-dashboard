@@ -168,6 +168,19 @@ export type SheetContact = {
   apolloPersonId: string;
   sheetId: string;
   sheetName: string;
+  /** Present only if the sheet already has a `seniority` column (part of the
+   *  standard 10-column CSV schema, but unused by this type until now). */
+  seniority?: string;
+  /** Present only if the sheet already has a `location` column. */
+  location?: string;
+  /** 1-based row number within `sheetId`'s first tab (header is row 1) — lets
+   *  a later write (e.g. marking a LinkedIn send) target this exact row
+   *  without re-searching the sheet. */
+  rowIndex: number;
+  /** Present only if the sheet already has a `linkedin_status` column. */
+  linkedinStatus?: string;
+  /** Present only if the sheet already has a `linkedin_sent_at` column. */
+  linkedinSentAt?: string;
 };
 
 /** Reads every row of every spreadsheet in `folderId` — the expensive part
@@ -192,11 +205,19 @@ async function scanAllContacts(
         const emailCol = header.indexOf("email");
         const linkedinCol = header.indexOf("linkedin_url");
         const idCol = header.indexOf("apollo_person_id");
+        const statusCol = header.indexOf("linkedin_status");
+        const sentAtCol = header.indexOf("linkedin_sent_at");
+        const seniorityCol = header.indexOf("seniority");
+        const locationCol = header.indexOf("location");
 
         const out: SheetContact[] = [];
-        for (const row of values.slice(1)) {
+        values.slice(1).forEach((row, i) => {
           const cell = row[companyCol]?.trim() ?? "";
-          if (!cell) continue;
+          if (!cell) return;
+          const status = statusCol >= 0 ? (row[statusCol] ?? "").trim() : "";
+          const sentAt = sentAtCol >= 0 ? (row[sentAtCol] ?? "").trim() : "";
+          const seniority = seniorityCol >= 0 ? (row[seniorityCol] ?? "").trim() : "";
+          const location = locationCol >= 0 ? (row[locationCol] ?? "").trim() : "";
           out.push({
             firstname: firstnameCol >= 0 ? (row[firstnameCol] ?? "").trim() : "",
             lastname: lastnameCol >= 0 ? (row[lastnameCol] ?? "").trim() : "",
@@ -207,8 +228,14 @@ async function scanAllContacts(
             apolloPersonId: idCol >= 0 ? (row[idCol] ?? "").trim() : "",
             sheetId: s.id,
             sheetName: s.name,
+            // Header is row 1, so the Nth data row (0-based `i`) sits at sheet row i+2.
+            rowIndex: i + 2,
+            ...(status ? { linkedinStatus: status } : {}),
+            ...(sentAt ? { linkedinSentAt: sentAt } : {}),
+            ...(seniority ? { seniority } : {}),
+            ...(location ? { location } : {}),
           });
-        }
+        });
         return out;
       } catch {
         return []; // A single unreadable sheet shouldn't fail the whole scan.
@@ -302,6 +329,28 @@ export async function findContactsForCompany(
   return index.contacts.filter((c) => companyNamesMatch(c.company, companyName));
 }
 
+/**
+ * Every distinct company name across the warm index, deduped
+ * case-insensitively but keeping the first-seen casing (so "OCBC" doesn't
+ * get silently rewritten to "ocbc"). Powers the LinkedIn Drafts company
+ * picker — it only ever needs to offer companies that already have a sheet.
+ */
+export async function listCompaniesFromIndex(folderId: string): Promise<string[]> {
+  let index: SheetsIndex;
+  try {
+    index = await warmSheetsIndex(folderId);
+  } catch {
+    return [];
+  }
+
+  const seen = new Map<string, string>();
+  for (const c of index.contacts) {
+    const key = c.company.trim().toLowerCase();
+    if (key && !seen.has(key)) seen.set(key, c.company.trim());
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b));
+}
+
 /** Appends rows after the last row with data in `range`'s sheet. */
 export async function appendRows(
   spreadsheetId: string,
@@ -339,6 +388,142 @@ export async function updateRange(
     updatedRange: res.data.updatedRange ?? undefined,
     updatedCells: res.data.updatedCells ?? undefined,
   };
+}
+
+/** "A" for 0, "B" for 1, ... "Z" for 25, "AA" for 26, matching Sheets' own column labels. */
+function columnLetter(index0: number): string {
+  let n = index0 + 1;
+  let s = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+/** Per-spreadsheet cache of the first tab's internal numeric id (gid) — needed
+ *  for cell-formatting requests, which address a sheet by gid, not by name or
+ *  index. Safe to cache for the process lifetime: a tab's gid doesn't change
+ *  unless the tab itself is deleted and recreated. */
+const sheetGidCache = new Map<string, number>();
+
+async function getFirstSheetId(spreadsheetId: string): Promise<number> {
+  const cached = sheetGidCache.get(spreadsheetId);
+  if (cached !== undefined) return cached;
+
+  const sheets = getClient();
+  const res = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets.properties(sheetId,index)",
+  });
+  const first = res.data.sheets?.find((s) => s.properties?.index === 0);
+  const gid = first?.properties?.sheetId ?? 0;
+  sheetGidCache.set(spreadsheetId, gid);
+  return gid;
+}
+
+/** Sets a solid background color on one cell via `batchUpdate`'s `repeatCell`
+ *  — the values.* endpoints used elsewhere in this file only ever touch cell
+ *  *values*, never formatting, so this is a distinct code path. */
+async function formatCellBackground(
+  spreadsheetId: string,
+  sheetGid: number,
+  rowIndex0: number,
+  colIndex0: number,
+  color: { red: number; green: number; blue: number },
+): Promise<void> {
+  const sheets = getClient();
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          repeatCell: {
+            range: {
+              sheetId: sheetGid,
+              startRowIndex: rowIndex0,
+              endRowIndex: rowIndex0 + 1,
+              startColumnIndex: colIndex0,
+              endColumnIndex: colIndex0 + 1,
+            },
+            cell: { userEnteredFormat: { backgroundColor: color } },
+            fields: "userEnteredFormat.backgroundColor",
+          },
+        },
+      ],
+    },
+  });
+}
+
+/**
+ * Finds (or creates) the `linkedin_status` / `linkedin_sent_at` columns on a
+ * sheet, appending them to the header row if they don't exist yet. Separate
+ * from the fixed 10-column CSV schema in `lib/csv.ts` — this only ever
+ * extends a sheet's own header, never touches what `contactsToRows` writes,
+ * so it can't drift the local-CSV schema AGENTS.md pins in place.
+ */
+async function ensureLinkedinTrackingColumns(
+  spreadsheetId: string,
+): Promise<{ linkedinUrlCol: number; statusCol: number; sentAtCol: number }> {
+  const headerRows = await readRange(spreadsheetId, "A1:Z1");
+  const header = (headerRows[0] ?? []).map((h) => (h ?? "").trim().toLowerCase());
+
+  const linkedinUrlCol = header.indexOf("linkedin_url");
+  if (linkedinUrlCol < 0) {
+    throw new Error("This sheet has no linkedin_url column — cannot track a LinkedIn send here.");
+  }
+
+  let statusCol = header.indexOf("linkedin_status");
+  let sentAtCol = header.indexOf("linkedin_sent_at");
+
+  if (statusCol < 0 || sentAtCol < 0) {
+    const nextCol = header.length;
+    const newHeaders: string[] = [];
+    if (statusCol < 0) {
+      statusCol = nextCol + newHeaders.length;
+      newHeaders.push("linkedin_status");
+    }
+    if (sentAtCol < 0) {
+      sentAtCol = nextCol + newHeaders.length;
+      newHeaders.push("linkedin_sent_at");
+    }
+    const startLetter = columnLetter(nextCol);
+    const endLetter = columnLetter(nextCol + newHeaders.length - 1);
+    await updateRange(spreadsheetId, `${startLetter}1:${endLetter}1`, [newHeaders]);
+  }
+
+  return { linkedinUrlCol, statusCol, sentAtCol };
+}
+
+/** Pale green — visible against both light and dark Sheets themes without
+ *  reading as an error/warning color. */
+const LINKEDIN_SENT_GREEN = { red: 0.78, green: 0.91, blue: 0.8 };
+
+/**
+ * Records a manual "I sent this LinkedIn connection request" confirmation:
+ * writes `linkedin_status`/`linkedin_sent_at` into the contact's row (adding
+ * those columns first if the sheet doesn't have them yet) and shades the
+ * `linkedin_url` cell green. There is no LinkedIn API that can verify a send
+ * actually happened — this is a trusted manual confirmation, the same trust
+ * model as the rest of this app's human-in-the-loop steps.
+ */
+export async function markLinkedinContactSent(
+  spreadsheetId: string,
+  rowIndex: number,
+): Promise<{ sentAt: string }> {
+  const { linkedinUrlCol, statusCol, sentAtCol } = await ensureLinkedinTrackingColumns(spreadsheetId);
+  const sentAt = new Date().toISOString().slice(0, 10);
+
+  const statusLetter = columnLetter(statusCol);
+  const sentAtLetter = columnLetter(sentAtCol);
+  await updateRange(spreadsheetId, `${statusLetter}${rowIndex}:${statusLetter}${rowIndex}`, [["Sent"]]);
+  await updateRange(spreadsheetId, `${sentAtLetter}${rowIndex}:${sentAtLetter}${rowIndex}`, [[sentAt]]);
+
+  const gid = await getFirstSheetId(spreadsheetId);
+  await formatCellBackground(spreadsheetId, gid, rowIndex - 1, linkedinUrlCol, LINKEDIN_SENT_GREEN);
+
+  return { sentAt };
 }
 
 /**

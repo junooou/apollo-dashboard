@@ -5,3 +5,6 @@ data/runs.json
 .env.local
 *.tsbuildinfo
 next-env.d.ts
+data/news-candidates.json
+data/news-scored.json
+data/news-history.json

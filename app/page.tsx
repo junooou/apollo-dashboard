@@ -123,10 +123,58 @@ function formatNewsTriggerDate(value: string) {
   });
 }
 
+type JobSignalScore = {
+  relevanceScore: number;
+  isTargetCompany: boolean;
+  whyRelevant: string;
+  suggestedOutreachAngle: string;
+  recommendedAction: "generate_outreach" | "watch";
+};
+
+type JobSignal = {
+  uuid: string;
+  title: string;
+  jobUrl: string;
+  postedDate: string;
+  positionLevel: string | null;
+  employmentType: string | null;
+  company: {
+    uen: string;
+    name: string;
+    employeeCount: number | null;
+    ssicCode: string | null;
+  };
+  department: string;
+  score: JobSignalScore;
+  firstSeenAt: string;
+  isNew: boolean;
+};
+
+type JobSignalResponse = {
+  opportunities: JobSignal[];
+  watching: JobSignal[];
+  counts: {
+    totalListings: number;
+    opportunities: number;
+    watching: number;
+    newListings: number;
+    targetCompanyHits: number;
+  };
+  cache?: { lastRefreshAt: string | null };
+  error?: string;
+};
+
+function formatJobSignalDate(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-SG", { day: "numeric", month: "short", year: "numeric" });
+}
+
 type Stage = "idle" | "searching" | "review" | "enriching" | "done";
 
 export default function Dashboard() {
-  const [workspace, setWorkspace] = useState<"leads" | "outreach" | "news">("leads");
+  const [workspace, setWorkspace] = useState<"leads" | "outreach" | "news" | "jobs">("leads");
   const [outreachPrefill, setOutreachPrefill] = useState<OutreachPrefill | null>(null);
   const [company, setCompany] = useState("");
   const [stage, setStage] = useState<Stage>("idle");
@@ -228,6 +276,75 @@ export default function Dashboard() {
   const [newsTriggersLoaded, setNewsTriggersLoaded] = useState(false);
   const [newsTriggersError, setNewsTriggersError] = useState<string | null>(null);
   const [showIgnoredNews, setShowIgnoredNews] = useState(false);
+
+  // Job Signals — MyCareersFuture is a free, unauthenticated public API, so
+  // unlike News Triggers this fetches live on every mount/refresh rather
+  // than waiting for a manual, cost-aware "refresh" click. See the mount
+  // effect below.
+  const [jobSignals, setJobSignals] = useState<JobSignal[]>([]);
+  const [watchingJobSignals, setWatchingJobSignals] = useState<JobSignal[]>([]);
+  const [jobSignalCounts, setJobSignalCounts] = useState<JobSignalResponse["counts"] | null>(null);
+  const [jobSignalCache, setJobSignalCache] = useState<JobSignalResponse["cache"] | null>(null);
+  const [jobSignalsLoading, setJobSignalsLoading] = useState(true);
+  const [jobSignalsLoaded, setJobSignalsLoaded] = useState(false);
+  const [jobSignalsError, setJobSignalsError] = useState<string | null>(null);
+  const [showWatchingJobSignals, setShowWatchingJobSignals] = useState(false);
+
+  const loadJobSignals = useCallback(async () => {
+    setJobSignalsLoading(true);
+    setJobSignalsError(null);
+    try {
+      const res = await fetch("/api/job-signals", { cache: "no-store" });
+      const data = (await res.json()) as JobSignalResponse;
+      if (!res.ok || data.error) {
+        throw new Error(data.error ?? `Job signals request failed (${res.status})`);
+      }
+      setJobSignals(data.opportunities ?? []);
+      setWatchingJobSignals(data.watching ?? []);
+      setJobSignalCounts(data.counts ?? null);
+      setJobSignalCache(data.cache ?? null);
+      setJobSignalsLoaded(true);
+    } catch (err) {
+      setJobSignalsError(err instanceof Error ? err.message : "Failed to load job signals");
+    } finally {
+      setJobSignalsLoading(false);
+    }
+  }, []);
+
+  // Fires once when the app loads, and again on every browser refresh —
+  // deliberately not gated behind opening the tab, unlike News Triggers,
+  // because there's no cost or credential to protect here.
+  useEffect(() => {
+    loadJobSignals();
+  }, [loadJobSignals]);
+
+  function handleGenerateOutreachFromJobSignal(signal: JobSignal) {
+    const jobContext = [
+      "This campaign was triggered by a live hiring signal, not a news event.",
+      "",
+      `Job posting: ${signal.title}`,
+      `Company: ${signal.company.name}`,
+      `Department match: ${signal.department}`,
+      `Posted: ${formatJobSignalDate(signal.postedDate)}`,
+      `Listing: ${signal.jobUrl}`,
+      "",
+      `Why this matters for Voncierge: ${signal.score.whyRelevant}`,
+      "",
+      `Suggested outreach angle: ${signal.score.suggestedOutreachAngle}`,
+      "",
+      "Use this open role as the timely, specific reason for reaching out — do not invent facts beyond what's stated here. Keep the outreach grounded in Voncierge's approved playbook.",
+    ].join("\n");
+
+    setOutreachPrefill({
+      requestId: Date.now(),
+      company: signal.company.name,
+      industry: "",
+      context: jobContext,
+      autoGenerate: true,
+    });
+
+    setWorkspace("outreach");
+  }
 
   useEffect(() => {
     setExistingContactsOpen(false);
@@ -932,6 +1049,15 @@ export default function Dashboard() {
             <span className="workspace-tab-number">03</span>
             ✦ News Triggers
           </button>
+
+          <button
+            type="button"
+            className={workspace === "jobs" ? "active" : ""}
+            onClick={() => setWorkspace("jobs")}
+          >
+            <span className="workspace-tab-number">04</span>
+            ✦ Job Signals
+          </button>
         </nav>
       </header>
 
@@ -1191,6 +1317,216 @@ export default function Dashboard() {
                           </div>
 
                           <span className="small muted">{trigger.domain}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Job Signals reuses the news-trigger-* CSS classes rather than a
+          parallel set — visually this is the same "scored signal card in a
+          feed" pattern as News Triggers, just a different source and a
+          deterministic (not AI) score. */}
+      {workspace === "jobs" && (
+        <div className="workspace-view news-triggers-workspace">
+          <div className="workspace-intro news-triggers-intro">
+            <div>
+              <span className="workspace-kicker">JOB SIGNALS · SINGAPORE</span>
+              <h2>Find who&apos;s hiring for this, right now.</h2>
+              <p>
+                Live job postings from MyCareersFuture (Singapore&apos;s official job
+                portal) matched against Voncierge&apos;s target departments. Free and
+                unauthenticated — refetched on every visit, no manual step needed.
+                Singapore-only: this complements the pipeline&apos;s other markets, it
+                doesn&apos;t cover them.
+              </p>
+            </div>
+
+            <div className="news-trigger-toolbar">
+              {jobSignalCache?.lastRefreshAt && (
+                <span className="small muted">
+                  Refreshed {formatNewsTriggerDate(jobSignalCache.lastRefreshAt)}
+                </span>
+              )}
+
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => loadJobSignals()}
+                disabled={jobSignalsLoading}
+                title="Fetches the latest listings from MyCareersFuture — free, no confirmation needed"
+              >
+                {jobSignalsLoading ? (
+                  <>
+                    <span className="spinner" />
+                    Refreshing…
+                  </>
+                ) : (
+                  "Refresh job signals"
+                )}
+              </button>
+            </div>
+          </div>
+
+          {jobSignalsError && (
+            <div className="notice error">
+              <AlertCircle size={16} />
+              <div>{jobSignalsError}</div>
+            </div>
+          )}
+
+          {jobSignalsLoading && !jobSignalsLoaded && (
+            <section className="panel news-trigger-loading" aria-live="polite">
+              <div className="news-trigger-loading-copy">
+                <span className="spinner" />
+                Fetching live listings from MyCareersFuture…
+              </div>
+            </section>
+          )}
+
+          {jobSignalsLoaded && jobSignalCounts && (
+            <>
+              <div className="news-trigger-summary">
+                <div className="news-trigger-stat">
+                  <span>Opportunities</span>
+                  <strong>{jobSignalCounts.opportunities}</strong>
+                </div>
+                <div className="news-trigger-stat">
+                  <span>Already in pipeline</span>
+                  <strong>{jobSignalCounts.targetCompanyHits}</strong>
+                </div>
+                <div className="news-trigger-stat">
+                  <span>Listings scanned</span>
+                  <strong>{jobSignalCounts.totalListings}</strong>
+                </div>
+                <div className="news-trigger-stat">
+                  <span>Data source</span>
+                  <strong>Live</strong>
+                </div>
+              </div>
+
+              {jobSignals.length === 0 ? (
+                <section className="panel">
+                  <div className="empty">
+                    <Info size={28} />
+                    <h3>No strong signals right now</h3>
+                    <p>
+                      {jobSignalCounts.totalListings} listings were scanned, but none
+                      crossed the 70-point review threshold this refresh.
+                    </p>
+                  </div>
+                </section>
+              ) : (
+                <div className="news-trigger-grid">
+                  {jobSignals.map((signal) => {
+                    const score = signal.score.relevanceScore;
+                    const scoreBand = score >= 85 ? "high" : score >= 70 ? "medium" : "low";
+
+                    return (
+                      <article
+                        className="news-trigger-card"
+                        data-score-band={scoreBand}
+                        key={signal.uuid}
+                      >
+                        <div className="news-trigger-card-top">
+                          <div className="news-trigger-identity">
+                            <div className="news-trigger-company-row">
+                              <span className={`news-score-badge ${scoreBand}`}>{score}</span>
+
+                              <div>
+                                <h3>{signal.company.name}</h3>
+                                <div className="news-trigger-meta">
+                                  <span>{signal.department}</span>
+                                  {signal.positionLevel && <span>{signal.positionLevel}</span>}
+                                  <span>{formatJobSignalDate(signal.postedDate)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                            {signal.isNew && <span className="news-new-pill">✦ New</span>}
+                            {signal.score.isTargetCompany && (
+                              <span className={`trigger-action-pill high`}>In pipeline</span>
+                            )}
+                          </div>
+                        </div>
+
+                        <a
+                          className="news-trigger-headline"
+                          href={signal.jobUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {signal.title}
+                        </a>
+
+                        <div className="news-trigger-analysis">
+                          <div className="news-trigger-analysis-block">
+                            <span className="news-trigger-label">WHY THIS MATTERS</span>
+                            <p>{signal.score.whyRelevant}</p>
+                          </div>
+
+                          <div className="news-trigger-analysis-block">
+                            <span className="news-trigger-label">SUGGESTED ANGLE</span>
+                            <p>{signal.score.suggestedOutreachAngle}</p>
+                          </div>
+                        </div>
+
+                        <div className="news-trigger-actions">
+                          <a
+                            className="news-read-link"
+                            href={signal.jobUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            View listing ↗
+                          </a>
+
+                          <button
+                            type="button"
+                            onClick={() => handleGenerateOutreachFromJobSignal(signal)}
+                          >
+                            <Mail size={15} />
+                            Generate outreach
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+
+              {watchingJobSignals.length > 0 && (
+                <div className="ignored-news-section">
+                  <button
+                    type="button"
+                    className="ghost ignored-news-toggle"
+                    onClick={() => setShowWatchingJobSignals((current) => !current)}
+                  >
+                    {showWatchingJobSignals ? "Hide" : "Show"} {watchingJobSignals.length} below-threshold
+                    listing{watchingJobSignals.length === 1 ? "" : "s"}
+                  </button>
+
+                  {showWatchingJobSignals && (
+                    <div className="ignored-news-list">
+                      {watchingJobSignals.map((signal) => (
+                        <div className="ignored-news-row" key={signal.uuid}>
+                          <span className="ignored-news-score">{signal.score.relevanceScore}</span>
+
+                          <div className="ignored-news-copy">
+                            <a href={signal.jobUrl} target="_blank" rel="noopener noreferrer">
+                              {signal.title}
+                            </a>
+                            <p>{signal.score.whyRelevant}</p>
+                          </div>
+
+                          <span className="small muted">{signal.company.name}</span>
                         </div>
                       ))}
                     </div>

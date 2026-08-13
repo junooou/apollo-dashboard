@@ -40,6 +40,8 @@ lib/history.ts    Run history persistence (data/runs.json) — local file, see b
 lib/runlog.ts     Generates a context.md table row
 lib/sheets.ts     Google Sheets client (service account) — see below
 lib/news.ts       Google News RSS fetch for the company overview
+lib/mycareersfuture.ts     MyCareersFuture (SG job portal) client — free, no key
+lib/job-signal-scoring.ts  Deterministic scoring for Job Signals — no AI, no cost
 app/page.tsx      The 3-stage dashboard
 app/history/      Run History dashboard — past runs logged on this machine
 app/settings/     Settings UI
@@ -371,6 +373,62 @@ date only — no article body or images. Parsing is a small purpose-built regex
 extractor rather than a real XML library, to keep the dependency list from
 growing again (see the `googleapis` note above). If Google changes the feed's
 markup this will need updating; there is no SLA to depend on.
+
+## Job Signals (`lib/mycareersfuture.ts`, `lib/job-signal-scoring.ts`)
+
+A fourth workspace tab, in the same "scored signal feed" family as News
+Triggers, but built on a genuinely free, unauthenticated public API —
+MyCareersFuture, Singapore's official government job portal
+(`api.mycareersfuture.gov.sg/v2/jobs`). No key, no signup, verified live
+(2026-08-13).
+
+**Fetch trigger is deliberately different from News Triggers.** News
+Triggers gates its refresh behind a manual button because Currents + OpenAI
+cost real money per call. MyCareersFuture costs nothing, so Job Signals
+fetches live on every page mount and every browser refresh — no cache-only
+default, no `?refresh=1` param. `app/api/job-signals/route.ts`'s `GET` always
+calls `refreshJobSignals()`.
+
+**Scoring is deterministic, not AI.** Job titles and departments are
+exact-match-able in a way news headlines aren't, so `lib/job-signal-scoring.ts`
+computes a 0–100 score from: 50 base (matched a target department) + up to 15
+for seniority (MyCareersFuture's own `positionLevels` field, backed by a
+title-text fallback for roles it under-labels) + up to 10 for freshness
+(decays after 14 days — deliberately, so an old listing doesn't stay
+permanently "hot") + 30 if the company is already in
+`Apollo Lead Generation/` (via `outputDir()` from `lib/csv.ts`, same folder
+the CSV dedupe already reads). No network call, no cost — this is what makes
+it safe to score on every single page load.
+
+**Recruitment agencies are filtered out.** Verified live: Singapore's SSIC
+code `78104` ("Employment placement agencies and executive search services")
+was confirmed against five staffing firms (Persol, GMP Recruitment, The
+Supreme HR Advisory, EA Recruitment, People Profilers, JobStudio) that were
+otherwise dominating results — a posting from one of these is a signal for
+an undisclosed end client, not the agency itself, and MyCareersFuture doesn't
+reveal who that client is. `RECRUITMENT_AGENCY_SSIC_CODES` in
+`lib/mycareersfuture.ts` filters on this before scoring even runs.
+
+**History intentionally does NOT accumulate forever, unlike News Triggers.**
+A news event stays true after it happened; a job posting that's no longer
+returned by MyCareersFuture has very likely been filled or expired.
+`app/api/job-signals/route.ts` drops history entries not present in the
+latest live fetch rather than keeping them — referencing an outreach angle
+around an already-closed role is worse than not mentioning it. If this ever
+needs revisiting (e.g. to show "recently closed" for context), that's a
+deliberate product decision, not a bug to "fix" back to News Triggers'
+keep-forever behaviour.
+
+**Coverage is Singapore-only.** Several companies already in
+`Apollo Lead Generation/` are based in Malaysia, Thailand, or Indonesia
+(Sunway, Siam Piwat, The Mall Group, KLCC, Pavilion, IOI Properties, Pacific
+Place Jakarta) and will never appear here. This complements the pipeline's
+Singapore coverage; it does not replace the rest.
+
+**`scripts/prototype-mycareersfuture.ts`** is the throwaway script that
+validated the API before this feature was built — a standalone CLI check,
+not wired into the app. Safe to delete once nobody needs it as a quick
+debugging reference outside the running app.
 
 ## Colour system
 

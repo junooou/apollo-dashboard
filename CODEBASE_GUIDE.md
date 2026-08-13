@@ -56,6 +56,7 @@ apollo-dashboard/
 │       ├── export/         ← Builds the downloadable CSV file
 │       ├── sheets/         ← Reads/writes Google Sheets
 │       ├── sheets-index/   ← Status of the cached Voncierge Outreach scan (the header's loading pill)
+│       ├── job-signals/    ← Live Singapore hiring-signal listings (MyCareersFuture — free, no key)
 │       ├── docs/           ← Saves a generated outreach email as a Google Doc
 │       ├── generate-template/ ← Talks to OpenAI: writes the outreach email sequence
 │       ├── presets/        ← Saves/loads named filter presets
@@ -77,13 +78,16 @@ apollo-dashboard/
 │   ├── sheets.ts           ← Google Sheets read/write logic
 │   ├── docs.ts             ← Google Docs "save this email" logic
 │   ├── news.ts             ← Fetches company news headlines (Google News RSS, no API key needed)
+│   ├── mycareersfuture.ts  ← MyCareersFuture (SG job portal) client — free, unauthenticated public API
+│   ├── job-signal-scoring.ts ← Deterministic 0–100 hiring-signal score — no AI call, no cost
 │   ├── types.ts            ← Shared TypeScript type definitions (shapes of data)
 │   └── *.test.ts           ← Automated tests, one per major file above
 │
 ├── data/                   ← Local files the app reads/writes at runtime
 │   ├── settings.json       ← Your saved filter settings (gitignored — local to you)
 │   ├── presets.json        ← Saved "Simple" filter presets (actually tracked in git, shared as a starting point)
-│   └── runs.json           ← Log of past sourcing runs (gitignored — local to this machine, see Run History below)
+│   ├── runs.json           ← Log of past sourcing runs (gitignored — local to this machine, see Run History below)
+│   └── job-signals-history.json ← Cached Job Signals listings (gitignored — pruned on every refresh, not kept forever)
 │
 ├── scripts/                 ← One-off command-line helper scripts (e.g. "check my Apollo key works")
 ├── criteria.default.json    ← The factory-default filter rules, transcribed from context.md
@@ -164,6 +168,24 @@ re-scans rather than showing stale data; there's also a manual ↻ button on
 the pill for the same purpose. **This cache lives only as long as the
 `npm run dev`/`npm start` process does** — it's not written to disk, and it
 resets on every restart.
+
+**Job Signals** (the fourth workspace tab) is the one feed in this app that
+fetches live on every single page load, no manual button, no cache-only
+default — deliberately different from both the sheets-index pill above and
+News Triggers. The reason is simple: `lib/mycareersfuture.ts` calls a
+genuinely free, unauthenticated public API (Singapore's official
+MyCareersFuture job portal), so there's no credit or credential to protect
+by making the user ask for fresh data. `app/api/job-signals/route.ts`'s
+`GET` always re-fetches, re-filters out recruitment agencies (by SSIC
+industry code — see `AGENTS.md` for how that code was verified), and
+re-scores every listing with `lib/job-signal-scoring.ts` — a plain
+deterministic function, not an AI call, which is exactly what makes it safe
+to run on every load. History is still kept (`data/job-signals-history.json`)
+for "is this new since last time" tracking, but unlike News Triggers'
+history — which keeps every article forever, because a news event stays
+true — job listings that no longer come back from a live fetch are dropped
+from history entirely, because a posting MyCareersFuture stops returning has
+almost certainly been filled or expired.
 
 ---
 

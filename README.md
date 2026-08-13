@@ -210,6 +210,35 @@ shorter") without starting over, and **save the result as a Google Doc**
 (`GOOGLE_PARENT_FOLDER_ID`) — so it needs the Google service account set up too
 if you want that step, not just the OpenAI key.
 
+## Job Signals
+
+A fourth workspace tab, "✦ Job Signals" — live hiring-signal listings from
+**MyCareersFuture**, Singapore's official government job portal. No API key
+and no setup: it's a genuinely public, unauthenticated endpoint, which is
+also why this tab behaves differently from News Triggers — it fetches fresh
+data on every page load and every browser refresh, rather than waiting for a
+manual "refresh" click. There's nothing to spend, so there's no reason to
+gate it.
+
+Each listing is matched against the same department taxonomy used for Apollo
+person search (Customer Experience, Digital Transformation, Consumer/Retail
+Banking, etc.), scored 0–100 without any AI call — the score comes from
+seniority, how recently the role was posted, and (the strongest signal) 30
+extra points if the hiring company already has contacts sourced in
+`../Apollo Lead Generation/`. Recruitment/staffing agencies (identified by
+Singapore's official SSIC industry code for that category) are filtered out
+before scoring, so a posting is never misattributed to a headhunter instead
+of their undisclosed client.
+
+Click "Generate outreach" on any card to pre-fill the Outreach Studio with
+the specific role, company, and reasoning as the timely angle for a first
+touch — same pattern as generating outreach from a News Trigger.
+
+**Coverage is Singapore-only.** A handful of companies already in
+`Apollo Lead Generation/` are based in Malaysia, Thailand, or Indonesia and
+will never show up here — this complements the pipeline's Singapore reach,
+it doesn't replace the rest.
+
 ## Colour
 
 Colour is bound to function, not decoration. Each workflow step owns a hue that

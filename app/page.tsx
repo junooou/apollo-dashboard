@@ -130,6 +130,10 @@ type JobSignalScore = {
    *  Sheets; false = found there; null = Sheets export isn't configured, so
    *  this can't be determined. */
   isNewLead: boolean | null;
+  /** True for a frontline/operational CX title — concierge, guest relations,
+   *  front desk — a live signal of the manpower-dependent service gap
+   *  Voncierge targets, distinct from a senior decision-maker hire. */
+  isFrontlineSignal: boolean;
   whyRelevant: string;
   suggestedOutreachAngle: string;
   recommendedAction: "generate_outreach" | "watch";
@@ -154,9 +158,19 @@ type JobSignal = {
   isNew: boolean;
 };
 
+type JobSignalOverviewRow = { label: string; count: number };
+
+type JobSignalOverview = {
+  roleBreakdown: JobSignalOverviewRow[];
+  topCompanies: JobSignalOverviewRow[];
+  frontlineSignals: number;
+  postedThisWeek: number;
+};
+
 type JobSignalResponse = {
   opportunities: JobSignal[];
   watching: JobSignal[];
+  overview?: JobSignalOverview;
   counts: {
     totalListings: number;
     opportunities: number;
@@ -290,6 +304,7 @@ export default function Dashboard() {
   const [jobSignals, setJobSignals] = useState<JobSignal[]>([]);
   const [watchingJobSignals, setWatchingJobSignals] = useState<JobSignal[]>([]);
   const [jobSignalCounts, setJobSignalCounts] = useState<JobSignalResponse["counts"] | null>(null);
+  const [jobSignalOverview, setJobSignalOverview] = useState<JobSignalOverview | null>(null);
   const [jobSignalCache, setJobSignalCache] = useState<JobSignalResponse["cache"] | null>(null);
   const [jobSignalsSheetsConfigured, setJobSignalsSheetsConfigured] = useState<boolean | null>(
     null,
@@ -315,6 +330,7 @@ export default function Dashboard() {
       setJobSignals(data.opportunities ?? []);
       setWatchingJobSignals(data.watching ?? []);
       setJobSignalCounts(data.counts ?? null);
+      setJobSignalOverview(data.overview ?? null);
       setJobSignalCache(data.cache ?? null);
       setJobSignalsSheetsConfigured(data.sheetsConfigured ?? null);
       setJobSignalsLoaded(true);
@@ -1383,10 +1399,13 @@ export default function Dashboard() {
               <h2>Find who&apos;s hiring for this, right now.</h2>
               <p>
                 Live job postings from MyCareersFuture (Singapore&apos;s official job
-                portal) matched against Voncierge&apos;s target departments. Free and
-                unauthenticated — refetched on every visit, no manual step needed.
-                Singapore-only: this complements the pipeline&apos;s other markets, it
-                doesn&apos;t cover them.
+                portal) matched against Voncierge&apos;s target departments — including
+                frontline and operational CX roles (concierge, guest relations, front
+                desk). A company hiring for one of those is itself the signal: it&apos;s
+                still running the manpower-dependent service model Voncierge replaces.
+                Free and unauthenticated — refetched on every visit, no manual step
+                needed. Singapore-only: this complements the pipeline&apos;s other
+                markets, it doesn&apos;t cover them.
               </p>
             </div>
 
@@ -1472,7 +1491,7 @@ export default function Dashboard() {
 
           {jobSignalsLoaded && jobSignalCounts && (
             <>
-              <div className="news-trigger-summary">
+              <div className="news-trigger-summary job-signal-summary">
                 <div className="news-trigger-stat">
                   <span>Opportunities</span>
                   <strong>{jobSignalCounts.opportunities}</strong>
@@ -1496,6 +1515,67 @@ export default function Dashboard() {
                   <strong>Live</strong>
                 </div>
               </div>
+
+              {jobSignalOverview &&
+                (jobSignalOverview.roleBreakdown.length > 0 ||
+                  jobSignalOverview.topCompanies.length > 0) && (
+                  <section className="panel job-signal-overview">
+                    <div className="job-signal-overview-head">
+                      <h3>What companies are hiring for</h3>
+                      <p className="small muted">
+                        {jobSignalOverview.frontlineSignals} of {jobSignalCounts.totalListings}{" "}
+                        listing{jobSignalCounts.totalListings === 1 ? "" : "s"} are frontline or
+                        operational roles — concierge, guest relations, front desk — often the
+                        clearest sign a company needs exactly what Voncierge does.{" "}
+                        {jobSignalOverview.postedThisWeek} posted in the last 7 days.
+                      </p>
+                    </div>
+
+                    <div className="job-signal-overview-grid">
+                      <div className="job-signal-overview-col">
+                        <span className="news-trigger-label">ROLES BEING HIRED FOR</span>
+                        <div className="job-signal-bar-list">
+                          {jobSignalOverview.roleBreakdown.map((row) => {
+                            const max = jobSignalOverview.roleBreakdown[0]?.count || 1;
+                            return (
+                              <div className="job-signal-bar-row" key={row.label}>
+                                <span className="job-signal-bar-label">{row.label}</span>
+                                <div className="job-signal-bar-track">
+                                  <div
+                                    className="job-signal-bar-fill"
+                                    style={{ width: `${Math.max(6, (row.count / max) * 100)}%` }}
+                                  />
+                                </div>
+                                <span className="job-signal-bar-count">{row.count}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="job-signal-overview-col">
+                        <span className="news-trigger-label">TOP HIRING COMPANIES</span>
+                        <div className="job-signal-bar-list">
+                          {jobSignalOverview.topCompanies.map((row) => {
+                            const max = jobSignalOverview.topCompanies[0]?.count || 1;
+                            return (
+                              <div className="job-signal-bar-row" key={row.label}>
+                                <span className="job-signal-bar-label">{row.label}</span>
+                                <div className="job-signal-bar-track">
+                                  <div
+                                    className="job-signal-bar-fill"
+                                    style={{ width: `${Math.max(6, (row.count / max) * 100)}%` }}
+                                  />
+                                </div>
+                                <span className="job-signal-bar-count">{row.count}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                )}
 
               {visibleJobSignals.length === 0 ? (
                 <section className="panel">
@@ -1541,6 +1621,14 @@ export default function Dashboard() {
 
                           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                             {signal.isNew && <span className="news-new-pill">✦ New</span>}
+                            {signal.score.isFrontlineSignal && (
+                              <span
+                                className="trigger-action-pill low"
+                                title="A frontline/operational role — a direct signal of the manpower-dependent service gap Voncierge targets"
+                              >
+                                Frontline signal
+                              </span>
+                            )}
                             {signal.score.isTargetCompany ? (
                               <span className="trigger-action-pill high">In pipeline</span>
                             ) : (

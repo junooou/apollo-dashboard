@@ -9,7 +9,6 @@ import {
   type ScoredJobSignal,
 } from "@/lib/job-signal-scoring";
 import { outputDir } from "@/lib/csv";
-import { loadSettings } from "@/lib/settings";
 import { warmSheetsIndex } from "@/lib/sheets";
 
 export const runtime = "nodejs";
@@ -95,6 +94,58 @@ async function loadSheetsCompanyNames(): Promise<string[] | null> {
   return [...new Set(index.contacts.map((c) => c.company).filter(Boolean))];
 }
 
+export type JobSignalOverviewRow = { label: string; count: number };
+
+export type JobSignalOverview = {
+  /** Top departments/roles by listing count — "what companies are hiring
+   *  for", not just "what scored highest". */
+  roleBreakdown: JobSignalOverviewRow[];
+  /** Companies posting the most CX-relevant listings this refresh. */
+  topCompanies: JobSignalOverviewRow[];
+  /** Count of listings matching a frontline/operational CX title (concierge,
+   *  guest relations, front desk, ...) — see lib/job-signal-scoring.ts's
+   *  isFrontlineSignal. */
+  frontlineSignals: number;
+  /** Listings posted within the last 7 days. */
+  postedThisWeek: number;
+};
+
+/** Ranks `label` occurrences by frequency, most common first. */
+function topCounts(labels: string[], limit: number): JobSignalOverviewRow[] {
+  const counts = new Map<string, number>();
+  for (const label of labels) {
+    if (!label) continue;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([label, count]) => ({ label, count }));
+}
+
+function isPostedThisWeek(postedDate: string): boolean {
+  if (!postedDate) return false;
+  const posted = new Date(postedDate).getTime();
+  if (Number.isNaN(posted)) return false;
+  return (Date.now() - posted) / (1000 * 60 * 60 * 24) <= 7;
+}
+
+/**
+ * "After job listings have been gathered, I want a brief overview of what
+ * roles companies are hiring" — built from EVERY listing that survived the
+ * relevance filter (opportunities + watching), not just the ones that
+ * crossed the 70-point threshold, since a below-threshold role can still be
+ * useful context for "what's out there right now".
+ */
+function buildOverview(results: JobSignalResult[]): JobSignalOverview {
+  return {
+    roleBreakdown: topCounts(results.map((r) => r.department), 8),
+    topCompanies: topCounts(results.map((r) => r.company.name), 6),
+    frontlineSignals: results.filter((r) => r.score.isFrontlineSignal).length,
+    postedThisWeek: results.filter((r) => isPostedThisWeek(r.postedDate)).length,
+  };
+}
+
 function buildResponse(history: JobSignalHistory, sheetsConfigured: boolean) {
   const latestRefreshAt = history.lastRefreshAt;
 
@@ -121,6 +172,7 @@ function buildResponse(history: JobSignalHistory, sheetsConfigured: boolean) {
   return {
     opportunities,
     watching,
+    overview: buildOverview(results),
     counts: {
       totalListings: results.length,
       opportunities: opportunities.length,
@@ -154,23 +206,20 @@ async function refreshJobSignals(history: JobSignalHistory): Promise<JobSignalHi
   // anything a "new lead".
   const sheetsCompanyNames = await loadSheetsCompanyNames();
 
-  const [candidates, targetCompanyNames, settings] = await Promise.all([
+  const [candidates, targetCompanyNames] = await Promise.all([
     fetchJobSignalCandidates(),
     loadTargetCompanyNames(),
-    loadSettings(),
   ]);
 
   const existingByUuid = new Map(history.entries.map((e) => [e.listing.uuid, e]));
   const nextEntries: JobSignalHistoryEntry[] = [];
 
   for (const listing of candidates) {
-    // Same exclude / conditional-exclude / negative-signal rules as the
-    // Apollo people search (Apollo Lead Generation/context.md), plus a
-    // junior-frontline check this feed needs and the people search doesn't
-    // (that pipeline is already pre-scoped to manager+ seniority). A listing
-    // that fails this check never enters history — same hard-drop semantics
-    // as an excluded Apollo candidate.
-    if (!evaluateJobSignalRelevance(listing, settings).relevant) continue;
+    // Job Signals' own short exclude list (lib/job-signal-scoring.ts) — NOT
+    // the Apollo people-search exclusion rules. A listing that fails this
+    // check never enters history — same hard-drop semantics as an excluded
+    // Apollo candidate.
+    if (!evaluateJobSignalRelevance(listing).relevant) continue;
 
     const score = scoreJobSignal(listing, targetCompanyNames, sheetsCompanyNames);
     const existing = existingByUuid.get(listing.uuid);

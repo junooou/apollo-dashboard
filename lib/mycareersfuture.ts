@@ -115,10 +115,36 @@ function toListing(raw: RawMcfJob, department: string): JobSignalListing | null 
 }
 
 /**
- * One search per "recommended" department (lib/taxonomy.ts), run in
- * parallel — the same taxonomy already used for Apollo person search, on
- * the theory that "who we'd search Apollo for" and "which hiring signals
- * matter" should be one list, not two independently-maintained ones.
+ * 2026-08-13 follow-up: extra Job-Signal-only queries, deliberately NOT
+ * added to lib/taxonomy.ts's DEPARTMENTS. Those departments double as
+ * Apollo's person-search taxonomy — who's worth pitching to — and a
+ * concierge or front-desk hire is not someone Apollo should be searching
+ * for as a contact. But it IS exactly the hiring signal Job Signals wants:
+ * a mall or property operator posting for a mall concierge or guest-service
+ * role is a live, ground-level sign of the manpower-dependent service gap
+ * Voncierge's positioning targets. Keeping this list separate lets Job
+ * Signals broaden its search without also broadening who Apollo searches
+ * for as a pitch contact. Tagged under existing department labels (rather
+ * than inventing a new department) so downstream grouping/labels stay
+ * consistent with the rest of the feed.
+ */
+const FRONTLINE_QUERIES: { department: string; keyword: string }[] = [
+  { department: "Customer Service / Contact Centre", keyword: "concierge" },
+  { department: "Customer Service / Contact Centre", keyword: "guest relations" },
+  { department: "Customer Service / Contact Centre", keyword: "guest service" },
+  { department: "Customer Service / Contact Centre", keyword: "front desk" },
+  { department: "Customer Service / Contact Centre", keyword: "front office" },
+  { department: "Customer Experience", keyword: "visitor experience" },
+  { department: "Customer Experience", keyword: "guest experience" },
+];
+
+/**
+ * One search per "recommended" department (lib/taxonomy.ts) plus the extra
+ * frontline queries above, run in parallel — the department list is the
+ * same taxonomy already used for Apollo person search, on the theory that
+ * "who we'd search Apollo for" and "which hiring signals matter" should
+ * mostly be one list, not two independently-maintained ones; FRONTLINE_QUERIES
+ * is the deliberate exception (see its comment).
  *
  * Deliberately one sharp keyword per department rather than the full
  * keyword list per department: MyCareersFuture's `search` behaves like an
@@ -127,10 +153,13 @@ function toListing(raw: RawMcfJob, department: string): JobSignalListing | null 
  * single-term queries, not one combined one.
  */
 export async function fetchJobSignalCandidates(): Promise<JobSignalListing[]> {
-  const queries = DEPARTMENTS.filter((d) => d.recommended).map((d) => ({
-    department: d.label,
-    keyword: d.keywords[0],
-  }));
+  const queries = [
+    ...DEPARTMENTS.filter((d) => d.recommended).map((d) => ({
+      department: d.label,
+      keyword: d.keywords[0],
+    })),
+    ...FRONTLINE_QUERIES,
+  ];
 
   const perDepartment = await Promise.all(
     queries.map(async ({ department, keyword }) => {

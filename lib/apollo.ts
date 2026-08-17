@@ -160,6 +160,8 @@ async function requestWithRaw<T>(
 
 type RawOrg = {
   id?: string;
+  /** Only present on `mixed_companies/search` results in the `accounts` bucket — the real Apollo org ID, distinct from `id` (an account ID). */
+  organization_id?: string;
   name?: string;
   primary_domain?: string;
   website_url?: string;
@@ -178,13 +180,22 @@ function normaliseDomain(input?: string | null): string | null {
     .replace(/\/.*$/, "") || null;
 }
 
-function toOrganization(raw: RawOrg): Organization {
+/**
+ * `idField` selects which raw field is the real Apollo organization ID.
+ * `mixed_companies/search` returns two buckets with different ID semantics:
+ * `organizations` entries use `id` directly, but `accounts` entries (companies
+ * already saved to this Apollo team) use `id` for an *account* ID — the real
+ * org ID lives in `organization_id`. Passing the wrong one resolves the
+ * company "successfully" but makes every downstream people-search silently
+ * match nothing, since Apollo's organization_ids filter only accepts org IDs.
+ */
+function toOrganization(raw: RawOrg, idField: "id" | "organization_id" = "id"): Organization {
   const domains = [raw.primary_domain, raw.domain, raw.website_url]
     .map(normaliseDomain)
     .filter((d): d is string => Boolean(d));
   const unique = [...new Set(domains)];
   return {
-    id: raw.id ?? "",
+    id: (idField === "organization_id" ? raw.organization_id : raw.id) ?? raw.id ?? "",
     name: raw.name ?? "",
     domain: unique[0] ?? null,
     altDomains: unique.slice(1),
@@ -199,7 +210,11 @@ function toOrganization(raw: RawOrg): Organization {
  * group structures like "Sunway" span multiple domains (corporate vs mall unit).
  */
 export async function searchOrganizations(query: string): Promise<Organization[]> {
-  const looksLikeDomain = /\./.test(query) && !/\s/.test(query);
+  // Requires the whole trimmed input to be domain-shaped (label.label...tld),
+  // not just "contains a period" — a name like "Grab.com Holdings" or an
+  // abbreviation with a stray dot must not get routed to the domain-only path.
+  const looksLikeDomain =
+    /^(https?:\/\/)?(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(\/\S*)?$/i.test(query.trim());
 
   if (looksLikeDomain) {
     const domain = normaliseDomain(query);
@@ -207,7 +222,12 @@ export async function searchOrganizations(query: string): Promise<Organization[]
       `/organizations/enrich?domain=${encodeURIComponent(domain ?? query)}`,
       { method: "GET" },
     );
-    return data.organization ? [toOrganization(data.organization)] : [];
+    if (data.organization) {
+      return [toOrganization(data.organization)];
+    }
+    // No exact domain match — the query may have been misclassified (or is a
+    // domain Apollo just doesn't have), so fall through to the name search
+    // below instead of returning empty.
   }
 
   const data = await request<{ organizations?: RawOrg[]; accounts?: RawOrg[] }>(
@@ -218,7 +238,10 @@ export async function searchOrganizations(query: string): Promise<Organization[]
     },
   );
 
-  const orgs = [...(data.organizations ?? []), ...(data.accounts ?? [])];
+  const orgs = [
+    ...(data.organizations ?? []).map((o) => toOrganization(o, "id")),
+    ...(data.accounts ?? []).map((a) => toOrganization(a, "organization_id")),
+  ];
 
   // Apollo returns many records for one company ("Maybank" returns 10, mostly
   // subsidiaries). Rank the likeliest parent entity first.
@@ -230,7 +253,6 @@ export async function searchOrganizations(query: string): Promise<Organization[]
   // more likely the parent — "Maybank" over "Maybank Investment Banking Group".
   const q = query.trim().toLowerCase();
   return orgs
-    .map(toOrganization)
     .filter((o) => o.id)
     .sort((a, b) => {
       const an = a.name.toLowerCase();

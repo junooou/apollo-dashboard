@@ -510,6 +510,109 @@ validated the API before this feature was built — a standalone CLI check,
 not wired into the app. Safe to delete once nobody needs it as a quick
 debugging reference outside the running app.
 
+## Job Signals → Explore Outreach
+
+The Job Signals "Generate outreach" button was replaced with "Explore
+outreach" (`app/page.tsx`'s `handleExploreOutreachFromJobSignal`), which no
+longer prefills Outreach Studio. Instead it opens
+`app/components/JobSignalOutreachView.tsx`, a dedicated dashboard for one job
+signal: employer info, auto-loaded management contacts, then explicit
+enrich/save/mark-contacted steps — a separate flow from Outreach Studio's
+email/LinkedIn drafting, which still only operates on already-sourced
+contacts.
+
+**Who to pitch is not who's in the job listing.** A "hotel concierge"
+posting is the signal (see `isFrontlineSignal` in `lib/job-signal-scoring.ts`)
+but the pitch target is a decision-maker — General Manager, Front Office
+Manager, etc. `lib/job-signal-persona.ts`'s `getOutreachPersona()` maps the
+employer's SSIC code (MyCareersFuture's `company.ssicCode`) to an
+industry-specific title list, falling back to the same generic CX titles
+used elsewhere when the SSIC code isn't covered. **This mapping is a
+best-effort product decision, not verified against live data** the way
+`RECRUITMENT_AGENCY_SSIC_CODES` is — extend `PERSONA_RULES` as new verticals
+show up.
+
+**The contact search deliberately skips `lib/filter.ts`'s `filterAndRank`.**
+That pipeline's department gate (`evaluateCandidate`, `lib/filter.ts`) hard-
+excludes any title outside `settings.departments`, which is tuned for the
+banking/retail CX taxonomy in `lib/taxonomy.ts` — a "Front Office Manager"
+title matches none of those departments and would be silently dropped.
+`app/api/job-signal-outreach/route.ts`'s `GET` calls `searchPeople` directly
+with the persona's own title list (already the narrowing step) and ranks by
+`hasEmail` only.
+
+**Both calls in the GET handler are free.** `searchOrganizations` resolves a
+domain via `mixed_companies/search`, and `searchPeople` via
+`mixed_people/api_search` — no credits, per the credit-safety rule above.
+Enrichment only happens when the user selects contacts and hits "Enrich
+selected", reusing `/api/enrich` unchanged (it takes full `ScoredCandidate`
+objects, and the GET response already returns candidates in that exact
+shape so the frontend can pass them straight through).
+
+**Saved contacts land in one running "Job Signals Outreach" sheet, not a
+sheet per company** — a deliberate product decision so "who have we already
+contacted from a job signal" is a single scan, unlike the per-company sheets
+`app/api/sheets/route.ts`'s `pushContacts` targets.
+`getOrCreateJobSignalOutreachSheet()` (`lib/sheets.ts`) finds it by name
+inside `GOOGLE_PARENT_FOLDER_ID` (or creates it on first save);
+`GOOGLE_JOB_SIGNALS_SHEET_ID` overrides the lookup. Rows are the standard
+10-column schema (`lib/csv.ts`'s `contactsToRows`) plus `job_title`,
+`job_url`, `outreach_persona` — see `jobSignalContactsToRows`.
+
+**"Mark contacted" reuses the LinkedIn Drafts green-shading pattern, but
+anchors on `email` instead of `linkedin_url`.** A Job Signals contact might
+be reached by email or LinkedIn — the sheet doesn't track which, same trust
+model as "Mark as Sent" elsewhere (a manual confirmation, not a verified
+event). `ensureLinkedinTrackingColumns`/`markLinkedinContactSent` were
+generalized into a shared `ensureTrackingColumns` helper plus
+`markJobSignalContacted`, both in `lib/sheets.ts`.
+
+## Tag in Apollo (labels/lists)
+
+A fourth action alongside Download/Save/Push to Sheet in the Stage 3 summary
+panel, in `app/page.tsx` (state prefixed `label`/`tag`) and
+`app/api/apollo-labels/route.ts`. Adds the just-sourced contacts to a named
+Apollo "list" (Apollo's UI calls these Labels; the API calls them Lists —
+`GET/POST /labels`), so the team's Apollo CRM view can be filtered to exactly
+what this app sourced, without a second data store.
+
+**Apollo's label endpoints do not operate on searched people.** Verified
+against Apollo's own API docs (2026-08-15): `entity_ids` for
+`/labels/add_entity_ids_to_label_names` must be existing Contact/Account
+records already saved to the team, obtained via "Search for Contacts" — which
+"only returns contacts... added to your team's Apollo account," explicitly
+distinct from the People API Search this app already uses for sourcing. The
+`apolloPersonId` this app carries throughout (from `mixed_people/api_search`
+and `people/bulk_match`) is a prospect-database id, not a Contact id, and
+cannot be labeled directly.
+
+**`tagContactsInApollo()` (`lib/apollo.ts`) bridges the two via
+`POST /contacts/bulk_create`**, which creates-or-dedupes up to 100 contacts
+and applies `append_label_names` in the same call — no separate
+create-then-label round trip needed for the common case. `run_dedupe: true`
+means calling this again for an already-tagged contact updates the existing
+Apollo Contact in place rather than creating a duplicate; the response's
+`existing_contacts` vs `created_contacts` split is surfaced in the UI ("N new,
+M already in Apollo") so a repeat tag isn't silently miscounted as new.
+
+**Confirmed FREE — 0 credits**, per Apollo's docs for every endpoint involved
+(`/labels`, `/labels/add_entity_ids_to_label_names`,
+`/contacts/bulk_create`), unlike `enrichOrganization()`/`bulkMatch()` above.
+`GET /labels` was verified live (2026-08-15) against the real account; its
+response shape matches the documented one exactly. Still gated behind an
+explicit "Tag in Apollo" button rather than running automatically on save —
+not a credit concern here, but it writes into the team's shared Apollo CRM,
+visible to everyone on the account, same reasoning as "Push to Sheet."
+
+**List name, not list id, is the API's own primary key for this flow.**
+`append_label_names` and `add_entity_ids_to_label_names` both take names and
+auto-create the list if the name doesn't already exist for that modality — so
+the "New Apollo list" input in the UI needs no separate create-list call.
+`GET /api/apollo-labels` lists existing **contacts**-modality lists (accounts
+lists are filtered out; this app only ever tags people) to populate the
+"Existing Apollo list" picker, so repeat runs against the same company can
+land in the list already created for it.
+
 ## Colour system
 
 Colour encodes function; it is never decoration (Operate-mode rule).

@@ -691,3 +691,105 @@ export async function getCreditsRemaining(): Promise<number | null> {
   const snapshot = await getCreditUsage();
   return snapshot?.leadCreditsLeft ?? null;
 }
+
+/* ------------------------------------------------------------------ */
+/* Labels (Apollo's team-shared "Lists") — 0 credits                   */
+/* ------------------------------------------------------------------ */
+
+type RawLabel = {
+  id?: string;
+  name?: string;
+  modality?: string;
+  cached_count?: number;
+};
+
+export type ApolloLabel = {
+  id: string;
+  name: string;
+  modality: "contacts" | "accounts";
+  count: number;
+  /** Canonical deep link into the Apollo web app, per Apollo's own docs. */
+  appUrl: string;
+};
+
+function toLabel(raw: RawLabel): ApolloLabel {
+  const id = raw.id ?? "";
+  return {
+    id,
+    name: raw.name ?? "",
+    modality: raw.modality === "accounts" ? "accounts" : "contacts",
+    count: raw.cached_count ?? 0,
+    appUrl: id ? `https://app.apollo.io/#/lists/${id}` : "",
+  };
+}
+
+/** Every list ("label") visible to the team, contacts and accounts alike. Free. */
+export async function listLabels(): Promise<ApolloLabel[]> {
+  const data = await request<RawLabel[]>("/labels", { method: "GET" });
+  return Array.isArray(data) ? data.map(toLabel) : [];
+}
+
+export type LabelContactInput = {
+  firstName: string;
+  lastName: string;
+  email?: string | null;
+  title?: string | null;
+  organizationName: string;
+  linkedinUrl?: string | null;
+};
+
+/**
+ * Create-or-dedupe up to 100 contacts in Apollo's team CRM and tag them with
+ * one or more lists, in the same call, via `append_label_names`.
+ *
+ * This is the only way to label a person. Apollo's label endpoints
+ * (`/labels/add_entity_ids_to_label_names`) take `entity_ids` that must
+ * already be Contact/Account records saved to the team — never the
+ * `apolloPersonId` this app already carries from `mixed_people/api_search` or
+ * `people/bulk_match`, which lives in Apollo's separate prospect database.
+ * Verified against Apollo's own API docs (2026-08-15): "Search for Contacts"
+ * explicitly "only returns contacts in the search results... To search for
+ * people in the Apollo database, call the People API Search endpoint" —
+ * confirming Contacts and searched People are different record types.
+ * `/contacts/bulk_create` is what bridges the two: it saves a Contact (or, with
+ * `run_dedupe: true`, finds the existing one by email/name+company) and can
+ * apply labels in the same request, so no separate add-to-label call is
+ * needed for the common path.
+ *
+ * FREE — labeling costs 0 credits per Apollo's docs, unlike enrichOrganization
+ * and bulkMatch above. Still gated behind an explicit user action rather than
+ * running automatically: it writes into the team's shared Apollo CRM, visible
+ * to everyone on the account, same reasoning as "Push to Sheet".
+ */
+export async function tagContactsInApollo(
+  contacts: LabelContactInput[],
+  labelNames: string[],
+): Promise<{ created: number; existing: number }> {
+  let created = 0;
+  let existing = 0;
+
+  for (const batch of chunk(contacts, 100)) {
+    const body = {
+      contacts: batch.map((c) => ({
+        first_name: c.firstName,
+        last_name: c.lastName,
+        email: c.email || undefined,
+        title: c.title || undefined,
+        organization_name: c.organizationName,
+        linkedin_url: c.linkedinUrl || undefined,
+      })),
+      append_label_names: labelNames,
+      run_dedupe: true,
+    };
+
+    const data = await request<{
+      created_contacts?: unknown[];
+      existing_contacts?: unknown[];
+    }>("/contacts/bulk_create", { method: "POST", body });
+
+    created += data.created_contacts?.length ?? 0;
+    existing += data.existing_contacts?.length ?? 0;
+  }
+
+  return { created, existing };
+}

@@ -191,3 +191,10 @@ export const Reset = (p: IconProps) => (
     <path d="M3 4v5h5" />
   </Svg>
 );
+
+export const Tag = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12.6 3H5.4A2.4 2.4 0 0 0 3 5.4v7.2a2.4 2.4 0 0 0 .7 1.7l8.5 8.5a2.4 2.4 0 0 0 3.4 0l6.3-6.3a2.4 2.4 0 0 0 0-3.4l-8.5-8.5A2.4 2.4 0 0 0 12.6 3Z" />
+    <circle cx="8" cy="8" r="1.4" />
+  </Svg>
+);

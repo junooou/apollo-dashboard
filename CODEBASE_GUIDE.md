@@ -56,6 +56,7 @@ apollo-dashboard/
 │       ├── export/         ← Builds the downloadable CSV file
 │       ├── sheets/         ← Reads/writes Google Sheets
 │       ├── sheets-index/   ← Status of the cached Voncierge Outreach scan (the header's loading pill)
+│       ├── apollo-labels/  ← Lists/creates Apollo lists ("Tag in Apollo") — 0 credits
 │       ├── job-signals/    ← Live Singapore hiring-signal listings (MyCareersFuture — free, no key)
 │       ├── docs/           ← Saves a generated outreach email as a Google Doc
 │       ├── generate-template/ ← Talks to OpenAI: writes the outreach email sequence
@@ -125,9 +126,17 @@ point of view:
    `lib/enrich.ts`. That file calls Apollo's paid reveal endpoint in batches
    of 10, then runs the three safety checks (no email / personal email /
    wrong employer) before handing back a clean contact list.
-4. **Export** — `app/api/export/route.ts` (CSV download) or
-   `app/api/sheets/route.ts` (push to Google Sheet), both built on
-   `lib/csv.ts` and `lib/sheets.ts` respectively.
+4. **Export** — `app/api/export/route.ts` (CSV download),
+   `app/api/sheets/route.ts` (push to Google Sheet), or
+   `app/api/apollo-labels/route.ts` ("Tag in Apollo") — built on `lib/csv.ts`,
+   `lib/sheets.ts`, and `lib/apollo.ts`'s `tagContactsInApollo()`
+   respectively. Tagging is the odd one out: it doesn't write to a local file
+   or a Google resource at all — it writes into Apollo's own CRM, via
+   `POST /contacts/bulk_create`, since Apollo's list endpoints only accept
+   Contact records already saved to the team, not the raw prospect-search
+   results this app sources from. Free (0 credits), but still gated behind a
+   manual click, same reasoning as Push to Sheet: it's visible to the whole
+   team the moment it happens.
 5. **Logging** — the very last thing `app/api/enrich/route.ts` does before
    responding is call `lib/history.ts`'s `appendRun()`, so every completed run
    shows up on the `/history` page automatically. This happens regardless of

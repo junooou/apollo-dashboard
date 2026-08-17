@@ -183,6 +183,13 @@ From the results screen you can:
   creates a brand-new one, inside the shared Google Drive folder. (Requires
   the Google service account to be configured — ask an admin if this option
   is missing or errors out.)
+- **Tag in Apollo** — adds the contacts to a named list inside Apollo itself
+  (pick an existing list or name a new one), so anyone on the team browsing
+  Apollo directly can filter down to exactly what this app sourced. This
+  needs no extra setup — no Google account, no OpenAI key — and **costs no
+  Apollo credits**. Because it writes into Apollo where the whole team can
+  see it, it's a manual button rather than something that happens
+  automatically.
 - A **ready-to-paste summary line** for the team's shared `context.md` run
   log, so everyone can see what was sourced and when.
 

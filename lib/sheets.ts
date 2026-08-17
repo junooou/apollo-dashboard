@@ -457,48 +457,55 @@ async function formatCellBackground(
 }
 
 /**
- * Finds (or creates) the `linkedin_status` / `linkedin_sent_at` columns on a
- * sheet, appending them to the header row if they don't exist yet. Separate
- * from the fixed 10-column CSV schema in `lib/csv.ts` — this only ever
- * extends a sheet's own header, never touches what `contactsToRows` writes,
- * so it can't drift the local-CSV schema AGENTS.md pins in place.
+ * Finds (or creates) a pair of tracking columns on a sheet — an "anchor"
+ * column that must already exist (e.g. `linkedin_url`, `email`) plus a
+ * status/timestamp pair appended to the header row if they don't exist yet.
+ * Shared by `markLinkedinContactSent` and `markJobSignalContacted` — both
+ * record a manual "I did the outreach" confirmation, differing only in
+ * which columns they touch. Separate from the fixed 10-column CSV schema in
+ * `lib/csv.ts` — this only ever extends a sheet's own header, never touches
+ * what `contactsToRows` writes, so it can't drift the local-CSV schema
+ * AGENTS.md pins in place.
  */
-async function ensureLinkedinTrackingColumns(
+async function ensureTrackingColumns(
   spreadsheetId: string,
-): Promise<{ linkedinUrlCol: number; statusCol: number; sentAtCol: number }> {
+  anchorColumn: string,
+  statusColumn: string,
+  sentAtColumn: string,
+): Promise<{ anchorCol: number; statusCol: number; sentAtCol: number }> {
   const headerRows = await readRange(spreadsheetId, "A1:Z1");
   const header = (headerRows[0] ?? []).map((h) => (h ?? "").trim().toLowerCase());
 
-  const linkedinUrlCol = header.indexOf("linkedin_url");
-  if (linkedinUrlCol < 0) {
-    throw new Error("This sheet has no linkedin_url column — cannot track a LinkedIn send here.");
+  const anchorCol = header.indexOf(anchorColumn);
+  if (anchorCol < 0) {
+    throw new Error(`This sheet has no ${anchorColumn} column — cannot track a send here.`);
   }
 
-  let statusCol = header.indexOf("linkedin_status");
-  let sentAtCol = header.indexOf("linkedin_sent_at");
+  let statusCol = header.indexOf(statusColumn);
+  let sentAtCol = header.indexOf(sentAtColumn);
 
   if (statusCol < 0 || sentAtCol < 0) {
     const nextCol = header.length;
     const newHeaders: string[] = [];
     if (statusCol < 0) {
       statusCol = nextCol + newHeaders.length;
-      newHeaders.push("linkedin_status");
+      newHeaders.push(statusColumn);
     }
     if (sentAtCol < 0) {
       sentAtCol = nextCol + newHeaders.length;
-      newHeaders.push("linkedin_sent_at");
+      newHeaders.push(sentAtColumn);
     }
     const startLetter = columnLetter(nextCol);
     const endLetter = columnLetter(nextCol + newHeaders.length - 1);
     await updateRange(spreadsheetId, `${startLetter}1:${endLetter}1`, [newHeaders]);
   }
 
-  return { linkedinUrlCol, statusCol, sentAtCol };
+  return { anchorCol, statusCol, sentAtCol };
 }
 
 /** Pale green — visible against both light and dark Sheets themes without
  *  reading as an error/warning color. */
-const LINKEDIN_SENT_GREEN = { red: 0.78, green: 0.91, blue: 0.8 };
+const CONTACTED_GREEN = { red: 0.78, green: 0.91, blue: 0.8 };
 
 /**
  * Records a manual "I sent this LinkedIn connection request" confirmation:
@@ -512,7 +519,12 @@ export async function markLinkedinContactSent(
   spreadsheetId: string,
   rowIndex: number,
 ): Promise<{ sentAt: string }> {
-  const { linkedinUrlCol, statusCol, sentAtCol } = await ensureLinkedinTrackingColumns(spreadsheetId);
+  const { anchorCol, statusCol, sentAtCol } = await ensureTrackingColumns(
+    spreadsheetId,
+    "linkedin_url",
+    "linkedin_status",
+    "linkedin_sent_at",
+  );
   const sentAt = new Date().toISOString().slice(0, 10);
 
   const statusLetter = columnLetter(statusCol);
@@ -521,9 +533,80 @@ export async function markLinkedinContactSent(
   await updateRange(spreadsheetId, `${sentAtLetter}${rowIndex}:${sentAtLetter}${rowIndex}`, [[sentAt]]);
 
   const gid = await getFirstSheetId(spreadsheetId);
-  await formatCellBackground(spreadsheetId, gid, rowIndex - 1, linkedinUrlCol, LINKEDIN_SENT_GREEN);
+  await formatCellBackground(spreadsheetId, gid, rowIndex - 1, anchorCol, CONTACTED_GREEN);
 
   return { sentAt };
+}
+
+/**
+ * Same manual-confirmation pattern as `markLinkedinContactSent`, for the
+ * "Job Signals Outreach" sheet (see `getOrCreateJobSignalOutreachSheet`).
+ * Anchors on `email` rather than `linkedin_url` because a Job Signals
+ * contact was reached through whichever channel (email or LinkedIn) the
+ * user actually used — the sheet doesn't track which, same trust model as
+ * the rest of this app's "Mark as Sent" buttons.
+ */
+export async function markJobSignalContacted(
+  spreadsheetId: string,
+  rowIndex: number,
+): Promise<{ contactedAt: string }> {
+  const { anchorCol, statusCol, sentAtCol } = await ensureTrackingColumns(
+    spreadsheetId,
+    "email",
+    "outreach_status",
+    "contacted_at",
+  );
+  const contactedAt = new Date().toISOString().slice(0, 10);
+
+  const statusLetter = columnLetter(statusCol);
+  const sentAtLetter = columnLetter(sentAtCol);
+  await updateRange(spreadsheetId, `${statusLetter}${rowIndex}:${statusLetter}${rowIndex}`, [
+    ["Contacted"],
+  ]);
+  await updateRange(spreadsheetId, `${sentAtLetter}${rowIndex}:${sentAtLetter}${rowIndex}`, [
+    [contactedAt],
+  ]);
+
+  const gid = await getFirstSheetId(spreadsheetId);
+  await formatCellBackground(spreadsheetId, gid, rowIndex - 1, anchorCol, CONTACTED_GREEN);
+
+  return { contactedAt };
+}
+
+/** Name of the single running sheet every Job Signals-sourced contact gets
+ *  appended to, across all companies — one running log rather than a sheet
+ *  per employer, so "who have we already contacted" is a single scan
+ *  (product decision, not a technical constraint). */
+export const JOB_SIGNAL_OUTREACH_SHEET_NAME = "Job Signals Outreach";
+
+/** Cached per-process once resolved, same lifetime rule as `sheetGidCache` —
+ *  the sheet is found-or-created at most once per server process. */
+let cachedJobSignalOutreachSheetId: string | null = null;
+
+/**
+ * Finds the "Job Signals Outreach" spreadsheet in `parentFolderId`, or
+ * creates it if this is the first time anyone has saved a Job Signals
+ * contact. `GOOGLE_JOB_SIGNALS_SHEET_ID` skips the lookup entirely when set
+ * (e.g. if the sheet was created by hand and moved somewhere the folder
+ * scan wouldn't find it).
+ */
+export async function getOrCreateJobSignalOutreachSheet(parentFolderId: string): Promise<string> {
+  const envId = process.env.GOOGLE_JOB_SIGNALS_SHEET_ID?.trim();
+  if (envId) return envId;
+  if (cachedJobSignalOutreachSheetId) return cachedJobSignalOutreachSheetId;
+
+  const existing = await listSpreadsheetsInFolder(parentFolderId);
+  const found = existing.find((s) => s.name === JOB_SIGNAL_OUTREACH_SHEET_NAME);
+  if (found) {
+    cachedJobSignalOutreachSheetId = found.id;
+    return found.id;
+  }
+
+  const { spreadsheetId } = await createSpreadsheet(JOB_SIGNAL_OUTREACH_SHEET_NAME, ["Sheet1"], {
+    parentFolderId,
+  });
+  cachedJobSignalOutreachSheetId = spreadsheetId;
+  return spreadsheetId;
 }
 
 /**

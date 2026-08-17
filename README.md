@@ -270,6 +270,23 @@ firstname,lastname,title,company,seniority,email,email_status,linkedin_url,locat
 writes straight into `../Apollo Lead Generation/` — possible because this runs
 locally. Set `OUTPUT_DIR` in `.env.local` to point somewhere else.
 
+## Tag in Apollo
+
+A fourth result-screen action, alongside Download/Save/Push to Sheet: adds the
+just-sourced contacts to a named Apollo list (Apollo's UI calls these
+**Labels**) — pick an existing list or name a new one. This is what lets the
+team filter Apollo's own CRM to exactly what this app sourced, without a
+second data store to keep in sync.
+
+It costs **0 credits** — unlike search or enrichment, listing and tagging
+contacts is free on every Apollo plan. Under the hood it creates (or, if a
+matching email already exists, finds) each person as a real Apollo Contact and
+applies the list in the same call — a step this app has to do itself, since
+Apollo's list API only accepts existing Contact records, not the raw
+prospect-search results this app sources from. It's still a manual button
+rather than automatic, because unlike a local CSV or a private Google Sheet,
+an Apollo list is visible to your whole team the moment it's created.
+
 ## Run History
 
 `/history` lists every enrichment run completed on this machine — date,

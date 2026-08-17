@@ -7,6 +7,9 @@ import OutreachGenerator, {
   type OutreachPrefill,
 } from "./components/OutreachGenerator";
 import LinkedInDraftGenerator from "./components/LinkedInDraftGenerator";
+import JobSignalOutreachView, {
+  type JobSignalOutreachTarget,
+} from "./components/JobSignalOutreachView";
 import {
   AlertCircle,
   AlertTriangle,
@@ -21,6 +24,7 @@ import {
   Save,
   Search,
   Sliders,
+  Tag,
   Upload,
   Users,
 } from "./components/Icons";
@@ -198,6 +202,8 @@ export default function Dashboard() {
   const [workspace, setWorkspace] = useState<"leads" | "outreach" | "news" | "jobs">("leads");
   const [outreachPrefill, setOutreachPrefill] = useState<OutreachPrefill | null>(null);
   const [outreachChannel, setOutreachChannel] = useState<"email" | "linkedin">("email");
+  const [jobSignalOutreachTarget, setJobSignalOutreachTarget] =
+    useState<JobSignalOutreachTarget | null>(null);
   const [company, setCompany] = useState("");
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -261,6 +267,20 @@ export default function Dashboard() {
   const [newSheetTitle, setNewSheetTitle] = useState("");
   const [creatingSheet, setCreatingSheet] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+
+  // Tag in Apollo — creates/dedupes the reviewed contacts as Apollo Contacts
+  // and adds them to a named Apollo list ("label"), 0 credits. Existing list
+  // names are offered as a picker so repeat runs land in the same list.
+  const [labelOpen, setLabelOpen] = useState(false);
+  const [apolloLabels, setApolloLabels] = useState<{ name: string; count: number }[]>([]);
+  const [labelsLoading, setLabelsLoading] = useState(false);
+  const [labelsError, setLabelsError] = useState<string | null>(null);
+  const [labelMode, setLabelMode] = useState<"existing" | "new">("new");
+  const [selectedLabelName, setSelectedLabelName] = useState("");
+  const [newLabelName, setNewLabelName] = useState("");
+  const [tagging, setTagging] = useState(false);
+  const [tagResult, setTagResult] = useState<string | null>(null);
+  const [tagAppUrl, setTagAppUrl] = useState<string | null>(null);
 
   // Company overview — latest news (Google News RSS) and a check for
   // contacts already logged for this company across the Sheets folder.
@@ -343,32 +363,16 @@ export default function Dashboard() {
     }
   }, []);
 
-  function handleGenerateOutreachFromJobSignal(signal: JobSignal) {
-    const jobContext = [
-      "This campaign was triggered by a live hiring signal, not a news event.",
-      "",
-      `Job posting: ${signal.title}`,
-      `Company: ${signal.company.name}`,
-      `Department match: ${signal.department}`,
-      `Posted: ${formatJobSignalDate(signal.postedDate)}`,
-      `Listing: ${signal.jobUrl}`,
-      "",
-      `Why this matters for Voncierge: ${signal.score.whyRelevant}`,
-      "",
-      `Suggested outreach angle: ${signal.score.suggestedOutreachAngle}`,
-      "",
-      "Use this open role as the timely, specific reason for reaching out — do not invent facts beyond what's stated here. Keep the outreach grounded in Voncierge's approved playbook.",
-    ].join("\n");
-
-    setOutreachPrefill({
-      requestId: Date.now(),
-      company: signal.company.name,
-      industry: "",
-      context: jobContext,
-      autoGenerate: true,
+  function handleExploreOutreachFromJobSignal(signal: JobSignal) {
+    setJobSignalOutreachTarget({
+      title: signal.title,
+      jobUrl: signal.jobUrl,
+      postedDate: formatJobSignalDate(signal.postedDate),
+      company: signal.company,
+      department: signal.department,
+      isFrontlineSignal: signal.score.isFrontlineSignal,
+      whyRelevant: signal.score.whyRelevant,
     });
-
-    setWorkspace("outreach");
   }
 
   useEffect(() => {
@@ -880,6 +884,71 @@ export default function Dashboard() {
     setCreateError(null);
   }
 
+  async function toggleLabel() {
+    const next = !labelOpen;
+    setLabelOpen(next);
+    setTagResult(null);
+    setTagAppUrl(null);
+    if (next && apolloLabels.length === 0 && !labelsLoading) {
+      setLabelsLoading(true);
+      setLabelsError(null);
+      try {
+        const res = await fetch("/api/apollo-labels");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Failed to list Apollo lists");
+        const contactLists = (
+          data.labels as { name: string; count: number; modality: string }[]
+        ).filter((l) => l.modality === "contacts");
+        setApolloLabels(contactLists);
+        if (contactLists.length === 0) setLabelMode("new");
+      } catch (err) {
+        setLabelsError(err instanceof Error ? err.message : "Failed to list Apollo lists");
+      } finally {
+        setLabelsLoading(false);
+      }
+    }
+  }
+
+  async function handleTagInApollo() {
+    const labelName =
+      labelMode === "existing" ? selectedLabelName : newLabelName.trim();
+    if (!labelName) return;
+
+    setTagging(true);
+    setTagResult(null);
+    setTagAppUrl(null);
+
+    try {
+      const data = await post<{ created: number; existing: number; appUrl: string | null }>(
+        "/api/apollo-labels",
+        { contacts, labelName },
+      );
+
+      const parts = [];
+      if (data.created > 0) parts.push(`${data.created} new`);
+      if (data.existing > 0) parts.push(`${data.existing} already in Apollo`);
+      setTagResult(
+        `Tagged ${parts.join(", ") || "0 contacts"} with "${labelName}" in Apollo.`,
+      );
+      setTagAppUrl(data.appUrl);
+
+      if (labelMode === "new") {
+        setApolloLabels((prev) =>
+          prev.some((l) => l.name === labelName)
+            ? prev
+            : [...prev, { name: labelName, count: 0 }],
+        );
+        setSelectedLabelName(labelName);
+        setLabelMode("existing");
+        setNewLabelName("");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Tagging in Apollo failed");
+    } finally {
+      setTagging(false);
+    }
+  }
+
   async function handleCreateSheet() {
     const title = newSheetTitle.trim() || selectedOrg?.name || company;
     if (!title) return;
@@ -931,6 +1000,10 @@ export default function Dashboard() {
     setCreateOpen(false);
     setNewSheetTitle("");
     setCreateError(null);
+    setLabelOpen(false);
+    setTagResult(null);
+    setTagAppUrl(null);
+    setLabelsError(null);
   }
 
   const busy = stage === "searching" || stage === "enriching";
@@ -1410,11 +1483,20 @@ export default function Dashboard() {
         </div>
       )}
 
+      {workspace === "jobs" && jobSignalOutreachTarget && (
+        <div className="workspace-view">
+          <JobSignalOutreachView
+            signal={jobSignalOutreachTarget}
+            onBack={() => setJobSignalOutreachTarget(null)}
+          />
+        </div>
+      )}
+
       {/* Job Signals reuses the news-trigger-* CSS classes rather than a
           parallel set — visually this is the same "scored signal card in a
           feed" pattern as News Triggers, just a different source and a
           deterministic (not AI) score. */}
-      {workspace === "jobs" && (
+      {workspace === "jobs" && !jobSignalOutreachTarget && (
         <div className="workspace-view news-triggers-workspace">
           <div className="workspace-intro news-triggers-intro">
             <div>
@@ -1700,10 +1782,10 @@ export default function Dashboard() {
 
                           <button
                             type="button"
-                            onClick={() => handleGenerateOutreachFromJobSignal(signal)}
+                            onClick={() => handleExploreOutreachFromJobSignal(signal)}
                           >
-                            <Mail size={15} />
-                            Generate outreach
+                            <Users size={15} />
+                            Explore outreach
                           </button>
                         </div>
                       </article>
@@ -2487,7 +2569,15 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="row" style={{ marginBottom: 16 }}>
+          <div
+            className="row"
+            style={{
+              marginBottom: 16,
+              flexWrap: "nowrap",
+              overflowX: "auto",
+              paddingBottom: 4,
+            }}
+          >
             <button onClick={handleDownload} disabled={contacts.length === 0}>
               <Download size={15} />
               Download {csvName}
@@ -2517,6 +2607,15 @@ export default function Dashboard() {
             >
               <Plus size={15} />
               Create New Sheet
+            </button>
+            <button
+              className="secondary"
+              onClick={toggleLabel}
+              disabled={contacts.length === 0}
+              aria-expanded={labelOpen}
+            >
+              <Tag size={15} />
+              Tag in Apollo
             </button>
           </div>
 
@@ -2646,6 +2745,115 @@ export default function Dashboard() {
                   folder.
                 </div>
               )}
+            </div>
+          )}
+
+          {labelOpen && (
+            <div style={{ marginBottom: 16 }}>
+              <div
+                className="row"
+                style={{
+                  marginBottom: 12,
+                  alignItems: "flex-end",
+                }}
+              >
+                <div className="field">
+                  <label htmlFor="label-mode">List</label>
+
+                  <select
+                    id="label-mode"
+                    value={labelMode}
+                    onChange={(e) => setLabelMode(e.target.value as "existing" | "new")}
+                    disabled={tagging}
+                  >
+                    <option value="new">New Apollo list</option>
+                    <option value="existing">Existing Apollo list</option>
+                  </select>
+                </div>
+
+                {labelMode === "existing" ? (
+                  <div className="field">
+                    <label htmlFor="existing-label">Apollo list</label>
+
+                    {labelsLoading ? (
+                      <div className="small muted">Loading lists…</div>
+                    ) : labelsError ? (
+                      <div className="small" style={{ color: "var(--bad)" }}>
+                        {labelsError}
+                      </div>
+                    ) : apolloLabels.length === 0 ? (
+                      <div className="small muted">
+                        No existing contact lists found. Create a new one instead.
+                      </div>
+                    ) : (
+                      <select
+                        id="existing-label"
+                        value={selectedLabelName}
+                        onChange={(e) => setSelectedLabelName(e.target.value)}
+                        disabled={tagging}
+                      >
+                        <option value="">Choose a list…</option>
+                        {apolloLabels.map((label) => (
+                          <option key={label.name} value={label.name}>
+                            {label.name} ({label.count})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                ) : (
+                  <div className="field">
+                    <label htmlFor="new-label-name">New list name</label>
+
+                    <input
+                      id="new-label-name"
+                      type="text"
+                      value={newLabelName}
+                      onChange={(e) => setNewLabelName(e.target.value)}
+                      placeholder={
+                        selectedOrg?.name ? `${selectedOrg.name} — Voncierge` : "Voncierge Leads"
+                      }
+                      disabled={tagging}
+                    />
+                  </div>
+                )}
+
+                <button
+                  onClick={handleTagInApollo}
+                  disabled={
+                    tagging ||
+                    contacts.length === 0 ||
+                    (labelMode === "existing" && !selectedLabelName) ||
+                    (labelMode === "new" && !newLabelName.trim())
+                  }
+                >
+                  <Tag size={15} />
+                  {tagging ? "Tagging…" : "Tag"}
+                </button>
+              </div>
+
+              <div className="small muted">
+                Creates each contact in Apollo's team CRM if it doesn't already exist
+                (matched by email), then adds it to the list. Visible to everyone on the
+                Apollo account. Costs 0 credits.
+              </div>
+            </div>
+          )}
+
+          {tagResult && (
+            <div className="notice info">
+              <Check size={16} />
+              <div>
+                {tagResult}
+                {tagAppUrl && (
+                  <>
+                    {" "}
+                    <a href={tagAppUrl} target="_blank" rel="noreferrer">
+                      Open in Apollo
+                    </a>
+                  </>
+                )}
+              </div>
             </div>
           )}
 

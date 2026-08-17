@@ -61,6 +61,23 @@ export default function OutreachGenerator({
   const [docId, setDocId] = useState<string | null>(null);
   const [docUpdated, setDocUpdated] = useState(false);
 
+  const [saveTarget, setSaveTarget] = useState<"new" | "existing">("new");
+  const [existingDocs, setExistingDocs] = useState<
+    { id: string; name: string }[]
+  >([]);
+  const [existingDocsLoading, setExistingDocsLoading] = useState(false);
+  const [existingDocsError, setExistingDocsError] = useState<string | null>(
+    null,
+  );
+  const [selectedDocId, setSelectedDocId] = useState("");
+
+  const [docTabs, setDocTabs] = useState<
+    { tabId: string; title: string; nestingLevel: number }[]
+  >([]);
+  const [tabsLoading, setTabsLoading] = useState(false);
+  const [tabsError, setTabsError] = useState<string | null>(null);
+  const [selectedTabId, setSelectedTabId] = useState("");
+
   const [error, setError] = useState<string | null>(null);
 
   const processedRequestId = useRef<number | null>(null);
@@ -300,52 +317,147 @@ export default function OutreachGenerator({
     await navigator.clipboard.writeText(text);
   }
 
+  async function loadExistingDocs() {
+    if (existingDocs.length > 0 || existingDocsLoading) return;
+
+    setExistingDocsLoading(true);
+    setExistingDocsError(null);
+
+    try {
+      const response = await fetch("/api/docs?listFolder=1");
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.error || "Failed to load Google Docs.",
+        );
+      }
+
+      const docs: { id: string; name: string }[] = data.docs || [];
+      setExistingDocs(docs);
+
+      const hub = docs.find((d) =>
+        d.name.toLowerCase().includes("voncierge outreach"),
+      );
+
+      if (hub) {
+        setSelectedDocId(hub.id);
+      } else if (docs.length > 0) {
+        setSelectedDocId(docs[0].id);
+      }
+    } catch (err) {
+      setExistingDocsError(
+        err instanceof Error
+          ? err.message
+          : "Failed to load Google Docs.",
+      );
+    } finally {
+      setExistingDocsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (saveTarget !== "existing" || !selectedDocId) return;
+
+    let cancelled = false;
+
+    async function loadTabs() {
+      setTabsLoading(true);
+      setTabsError(null);
+      setSelectedTabId("");
+
+      try {
+        const response = await fetch(
+          `/api/docs?tabs=1&documentId=${encodeURIComponent(selectedDocId)}`,
+        );
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data.error || "Failed to load document tabs.",
+          );
+        }
+
+        if (!cancelled) {
+          setDocTabs(data.tabs || []);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setTabsError(
+            err instanceof Error
+              ? err.message
+              : "Failed to load document tabs.",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setTabsLoading(false);
+        }
+      }
+    }
+
+    loadTabs();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [saveTarget, selectedDocId]);
+
   async function saveToGoogleDoc() {
     if (!campaign) return;
-  
+
     setSavingDoc(true);
     setDocError(null);
     setDocUpdated(false);
     setDocUrl(null);
-  
+
     try {
       const response = await fetch("/api/docs", {
         method: "POST",
-  
+
         headers: {
           "Content-Type": "application/json",
         },
-  
+
         body: JSON.stringify({
-          documentId: docId || undefined,
+          documentId:
+            saveTarget === "existing"
+              ? selectedDocId
+              : docId || undefined,
+          ...(saveTarget === "existing"
+            ? { tabId: selectedTabId }
+            : {}),
           campaignName: campaign.campaignName,
           scope: campaign.scope,
           sequenceRationale:
             campaign.sequenceRationale,
           emails: campaign.emails,
-  
+
           company:
             scope === "company"
               ? company.trim() || undefined
               : undefined,
-  
+
           industry:
             industry.trim() || undefined,
         }),
       });
-  
+
       const data = await response.json();
-  
+
       if (!response.ok) {
         throw new Error(
           data.error ||
             "Failed to save Google Doc.",
         );
       }
-  
+
       setDocUrl(data.url);
-      setDocId(data.documentId);
       setDocUpdated(Boolean(data.updated));
+
+      if (saveTarget === "new") {
+        setDocId(data.documentId);
+      }
     } catch (err) {
       setDocError(
         err instanceof Error
@@ -637,6 +749,96 @@ export default function OutreachGenerator({
             <div
               className="row"
               style={{
+                alignItems: "flex-end",
+                gap: 10,
+                marginBottom: 10,
+              }}
+            >
+              <div className="field">
+                <label htmlFor="doc-save-target">Save destination</label>
+
+                <select
+                  id="doc-save-target"
+                  value={saveTarget}
+                  onChange={(e) => {
+                    const value = e.target.value as "new" | "existing";
+                    setSaveTarget(value);
+                    if (value === "existing") {
+                      loadExistingDocs();
+                    }
+                  }}
+                  disabled={savingDoc}
+                >
+                  <option value="new">Create new Google Doc</option>
+                  <option value="existing">
+                    Insert into existing Google Doc
+                  </option>
+                </select>
+              </div>
+
+              {saveTarget === "existing" && (
+                <>
+                  <div className="field">
+                    <label htmlFor="doc-existing-doc">Google Doc</label>
+
+                    {existingDocsLoading ? (
+                      <div className="small muted">Loading docs…</div>
+                    ) : existingDocsError ? (
+                      <div className="small" style={{ color: "var(--bad)" }}>
+                        {existingDocsError}
+                      </div>
+                    ) : existingDocs.length === 0 ? (
+                      <div className="small muted">
+                        No existing Docs found in the configured folder.
+                      </div>
+                    ) : (
+                      <select
+                        id="doc-existing-doc"
+                        value={selectedDocId}
+                        onChange={(e) => setSelectedDocId(e.target.value)}
+                        disabled={savingDoc}
+                      >
+                        {existingDocs.map((doc) => (
+                          <option key={doc.id} value={doc.id}>
+                            {doc.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="doc-existing-tab">Tab</label>
+
+                    {tabsLoading ? (
+                      <div className="small muted">Loading tabs…</div>
+                    ) : tabsError ? (
+                      <div className="small" style={{ color: "var(--bad)" }}>
+                        {tabsError}
+                      </div>
+                    ) : (
+                      <select
+                        id="doc-existing-tab"
+                        value={selectedTabId}
+                        onChange={(e) => setSelectedTabId(e.target.value)}
+                        disabled={savingDoc || !selectedDocId}
+                      >
+                        <option value="">Document root / first tab</option>
+                        {docTabs.map((tab) => (
+                          <option key={tab.tabId} value={tab.tabId}>
+                            {"— ".repeat(tab.nestingLevel) + tab.title}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div
+              className="row"
+              style={{
                 alignItems: "center",
                 gap: 10,
               }}
@@ -666,14 +868,17 @@ export default function OutreachGenerator({
                 disabled={
                     revising ||
                     generating ||
-                    savingDoc
+                    savingDoc ||
+                    (saveTarget === "existing" && !selectedDocId)
                 }
                 >
                 {savingDoc ? (
                     <>
                         <span className="spinner" />
-                        {docId ? "Updating…" : "Saving…"}
+                        {saveTarget === "existing" ? "Inserting…" : docId ? "Updating…" : "Saving…"}
                     </>
+                    ) : saveTarget === "existing" ? (
+                    "Insert into Google Doc"
                     ) : docId ? (
                     "Update Google Doc"
                     ) : (
@@ -687,7 +892,9 @@ export default function OutreachGenerator({
                     style={{ marginTop: 14 }}
                 >
                     <div>
-                    {docUpdated
+                    {saveTarget === "existing"
+                        ? "Inserted into Google Doc successfully."
+                        : docUpdated
                         ? "Google Doc updated successfully."
                         : "Google Doc created successfully."}{" "}
                     <a

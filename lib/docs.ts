@@ -1,4 +1,4 @@
-import { google } from "googleapis";
+import { google, docs_v1 } from "googleapis";
 
 function getGoogleAuth() {
   const clientEmail =
@@ -238,5 +238,190 @@ export async function updateCampaignDoc(
   return {
     documentId,
     url: `https://docs.google.com/document/d/${documentId}/edit`,
+  };
+}
+
+/** Matches the folder depth used for the equivalent Sheets picker (lib/sheets.ts) — the real Shared Drive nests real files one level below the configured parent folder. */
+const MAX_FOLDER_DEPTH = 4;
+
+async function listSubfolders(
+  drive: ReturnType<typeof google.drive>,
+  parentId: string,
+): Promise<string[]> {
+  const res = await drive.files.list({
+    q: `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    fields: "files(id)",
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "allDrives",
+  });
+  return (res.data.files ?? []).map((f) => f.id!).filter(Boolean);
+}
+
+async function collectFolderIds(
+  drive: ReturnType<typeof google.drive>,
+  rootId: string,
+): Promise<string[]> {
+  const all = [rootId];
+  let frontier = [rootId];
+
+  for (let depth = 0; depth < MAX_FOLDER_DEPTH && frontier.length > 0; depth++) {
+    const children = await Promise.all(frontier.map((id) => listSubfolders(drive, id)));
+    frontier = children.flat();
+    all.push(...frontier);
+  }
+
+  return all;
+}
+
+export async function listCampaignDocsInFolder(
+  folderId: string,
+): Promise<{ id: string; name: string }[]> {
+  const auth = getGoogleAuth();
+  const drive = google.drive({ version: "v3", auth });
+  const folderIds = await collectFolderIds(drive, folderId);
+
+  const parentClause = folderIds.map((id) => `'${id}' in parents`).join(" or ");
+  const res = await drive.files.list({
+    q: `(${parentClause}) and mimeType = 'application/vnd.google-apps.document' and trashed = false`,
+    fields: "files(id, name)",
+    orderBy: "name",
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "allDrives",
+  });
+  return (res.data.files ?? []).map((f) => ({ id: f.id!, name: f.name! }));
+}
+
+export type DocTab = {
+  tabId: string;
+  title: string;
+  nestingLevel: number;
+};
+
+function flattenTabs(
+  tabs: docs_v1.Schema$Tab[] | undefined,
+  out: DocTab[] = [],
+): DocTab[] {
+  for (const tab of tabs ?? []) {
+    const props = tab.tabProperties;
+    if (props?.tabId) {
+      out.push({
+        tabId: props.tabId,
+        title: props.title || "Untitled tab",
+        nestingLevel: props.nestingLevel ?? 0,
+      });
+    }
+    flattenTabs(tab.childTabs, out);
+  }
+  return out;
+}
+
+export async function listDocumentTabs(
+  documentId: string,
+): Promise<DocTab[]> {
+  const auth = getGoogleAuth();
+  const docs = google.docs({ version: "v1", auth });
+
+  const document = await docs.documents.get({
+    documentId,
+    fields: "tabs(tabProperties,childTabs)",
+  });
+
+  return flattenTabs(document.data.tabs);
+}
+
+function findTabBody(
+  tabs: docs_v1.Schema$Tab[] | undefined,
+  tabId: string,
+): docs_v1.Schema$Body | undefined {
+  for (const tab of tabs ?? []) {
+    if (tab.tabProperties?.tabId === tabId) {
+      return tab.documentTab?.body;
+    }
+    const found = findTabBody(tab.childTabs, tabId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * Inserts a campaign into an existing Doc, optionally scoped to one of its
+ * sub-tabs. Unlike updateCampaignDoc, this never renames the Drive file —
+ * the target is a shared multi-tab hub doc, not a doc this app owns.
+ *
+ * The Docs API has no way to create a new tab (no CreateTabRequest exists in
+ * the schema), so when `tabId` is omitted the request targets the document's
+ * root/first tab, matching the API's own documented fallback behavior for an
+ * unspecified tab ID.
+ */
+export async function insertIntoDocTab(
+  documentId: string,
+  tabId: string | undefined,
+  campaign: CampaignDocument,
+) {
+  const auth = getGoogleAuth();
+  const docs = google.docs({ version: "v1", auth });
+
+  let endIndex = 1;
+
+  if (tabId) {
+    const currentDocument = await docs.documents.get({
+      documentId,
+      includeTabsContent: true,
+    });
+
+    const tabBody = findTabBody(currentDocument.data.tabs, tabId);
+    const bodyContent = tabBody?.content ?? [];
+    const lastElement = bodyContent[bodyContent.length - 1];
+    endIndex = lastElement?.endIndex ?? 1;
+  } else {
+    const currentDocument = await docs.documents.get({
+      documentId,
+    });
+
+    const bodyContent = currentDocument.data.body?.content ?? [];
+    const lastElement = bodyContent[bodyContent.length - 1];
+    endIndex = lastElement?.endIndex ?? 1;
+  }
+
+  const documentText = buildDocumentText(campaign);
+
+  const requests: docs_v1.Schema$Request[] = [];
+
+  if (endIndex > 2) {
+    requests.push({
+      deleteContentRange: {
+        range: {
+          tabId,
+          startIndex: 1,
+          endIndex: endIndex - 1,
+        },
+      },
+    });
+  }
+
+  requests.push({
+    insertText: {
+      location: {
+        tabId,
+        index: 1,
+      },
+      text: documentText,
+    },
+  });
+
+  await docs.documents.batchUpdate({
+    documentId,
+    requestBody: {
+      requests,
+    },
+  });
+
+  return {
+    documentId,
+    url: tabId
+      ? `https://docs.google.com/document/d/${documentId}/edit?tab=t.${tabId}`
+      : `https://docs.google.com/document/d/${documentId}/edit`,
   };
 }

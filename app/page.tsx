@@ -24,6 +24,7 @@ import {
   Save,
   Search,
   Sliders,
+  Sparkle,
   Tag,
   Upload,
   Users,
@@ -45,6 +46,7 @@ import type {
   Settings,
 } from "@/lib/types";
 import type { NewsItem } from "@/lib/news";
+import type { ManagingCompanyResult } from "@/lib/managing-company";
 
 type ExistingContactMatch = { sheetId: string; sheetName: string; count: number };
 type ExistingContact = {
@@ -215,6 +217,17 @@ export default function Dashboard() {
    * below a form that has already done its job. Reopening it is one click.
    */
   const [searchOpen, setSearchOpen] = useState(true);
+
+  // "Find managing company" — the visible brand on a property (mall, hotel,
+  // building) is often not who makes vendor/tech decisions; that's frequently
+  // outsourced to a facilities management or real estate company instead.
+  // This looks that company up via OpenAI so it can be fed into the company
+  // search above, rather than requiring the user to already know it.
+  const [managerOpen, setManagerOpen] = useState(false);
+  const [managerQuery, setManagerQuery] = useState("");
+  const [managerLoading, setManagerLoading] = useState(false);
+  const [managerError, setManagerError] = useState<string | null>(null);
+  const [managerResult, setManagerResult] = useState<ManagingCompanyResult | null>(null);
 
   const [candidates, setCandidates] = useState<ScoredCandidate[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -632,8 +645,9 @@ export default function Dashboard() {
     return data as T;
   }
 
-  async function handleSearch(org?: Organization) {
-    if (!company.trim()) return;
+  async function handleSearch(org?: Organization, queryOverride?: string) {
+    const query = (queryOverride ?? company).trim();
+    if (!query) return;
     setError(null);
     setSavedTo(null);
     setStage("searching");
@@ -646,12 +660,12 @@ export default function Dashboard() {
       if (!target) {
         const { organizations } = await post<{ organizations: Organization[] }>(
           "/api/company",
-          { query: company },
+          { query },
         );
         setOrgs(organizations);
         if (organizations.length === 0) {
           setError(
-            `No Apollo organization found for "${company}". Try the company's domain instead (e.g. dbs.com).`,
+            `No Apollo organization found for "${query}". Try the company's domain instead (e.g. dbs.com).`,
           );
           setStage("idle");
           return;
@@ -673,7 +687,7 @@ export default function Dashboard() {
         diagnostics?: string[];
         settings: Settings;
       }>("/api/search", {
-        companyName: target.name || company,
+        companyName: target.name || query,
         organizationIds: target.id ? [target.id] : undefined,
         domains: target.domain ? [target.domain, ...target.altDomains] : undefined,
         // Quick filters override saved settings for this search only.
@@ -717,6 +731,38 @@ export default function Dashboard() {
       setError(err instanceof Error ? err.message : "Search failed");
       setStage("idle");
     }
+  }
+
+  async function handleFindManagingCompany() {
+    if (!managerQuery.trim()) return;
+    setManagerLoading(true);
+    setManagerError(null);
+    setManagerResult(null);
+    try {
+      const result = await post<ManagingCompanyResult>("/api/managing-company", {
+        property: managerQuery,
+      });
+      setManagerResult(result);
+    } catch (err) {
+      setManagerError(
+        err instanceof Error ? err.message : "Failed to look up the managing company",
+      );
+    } finally {
+      setManagerLoading(false);
+    }
+  }
+
+  // Hands the looked-up managing company to the company search field above
+  // and searches Apollo immediately — skips the redundant manual "Search"
+  // click, since the name is already resolved.
+  function useManagingCompany(name: string) {
+    setCompany(name);
+    setSelectedOrg(null);
+    setOrgs([]);
+    setManagerOpen(false);
+    setManagerResult(null);
+    setManagerQuery("");
+    handleSearch(undefined, name);
   }
 
   async function handleEnrich() {
@@ -1004,6 +1050,11 @@ export default function Dashboard() {
     setTagResult(null);
     setTagAppUrl(null);
     setLabelsError(null);
+    setManagerOpen(false);
+    setManagerQuery("");
+    setManagerLoading(false);
+    setManagerError(null);
+    setManagerResult(null);
   }
 
   const busy = stage === "searching" || stage === "enriching";
@@ -2107,6 +2158,110 @@ export default function Dashboard() {
             </button>
           )}
         </div>
+
+        {/* The brand on a property (a mall, hotel, or building) is often not
+            who makes vendor/tech decisions — that's frequently outsourced to
+            a facilities management or real estate company. This looks that
+            company up via OpenAI and hands it to the search field above. */}
+        <div className="overview-block" style={{ marginTop: 4, marginBottom: 16 }}>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setManagerOpen((v) => !v)}
+            aria-expanded={managerOpen}
+          >
+            <Sparkle size={14} />
+            Not sure who manages this property? Find the managing company
+          </button>
+
+          {managerOpen && (
+            <div style={{ marginTop: 10 }}>
+              <p className="small muted">
+                Some properties — malls, hotels, office towers — are run by a
+                separate facilities or real estate management company rather
+                than the brand itself. Describe the property and Voncierge
+                will look up who actually manages it.
+              </p>
+              <div className="row">
+                <div className="grow">
+                  <input
+                    type="text"
+                    placeholder="Property or building name — e.g. Raffles City Singapore"
+                    value={managerQuery}
+                    onChange={(e) => setManagerQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !managerLoading) handleFindManagingCompany();
+                    }}
+                    disabled={managerLoading}
+                  />
+                </div>
+                <button
+                  onClick={handleFindManagingCompany}
+                  disabled={managerLoading || !managerQuery.trim()}
+                >
+                  {managerLoading ? (
+                    <>
+                      <span className="spinner" />
+                      Searching…
+                    </>
+                  ) : (
+                    <>
+                      <Search size={15} />
+                      Find managing company
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {managerError && (
+                <p className="small muted" style={{ marginTop: 8 }}>
+                  {managerError}
+                </p>
+              )}
+
+              {managerResult && (
+                managerResult.found && managerResult.managingCompany ? (
+                  <div className="notice info wide" style={{ marginTop: 10 }}>
+                    <Building size={16} />
+                    <div style={{ width: "100%" }}>
+                      <strong>{managerResult.managingCompany}</strong>{" "}
+                      <span className="small muted">
+                        ({managerResult.confidence} confidence
+                        {managerResult.managingCompanyType
+                          ? ` · ${managerResult.managingCompanyType.replace(/_/g, " ")}`
+                          : ""}
+                        )
+                      </span>
+                      <p className="small" style={{ marginTop: 4 }}>
+                        {managerResult.reasoning}
+                      </p>
+                      {managerResult.alternateCandidates.length > 0 && (
+                        <p className="small muted">
+                          Other possibilities: {managerResult.alternateCandidates.join(", ")}
+                        </p>
+                      )}
+                      <div style={{ marginTop: 8 }}>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => useManagingCompany(managerResult.managingCompany!)}
+                        >
+                          Use this company
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="small muted" style={{ marginTop: 10 }}>
+                    {managerResult.reasoning ||
+                      "Couldn't confidently identify a managing company for this property."}
+                  </p>
+                )
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Quick filters — the settings people change run-to-run. */}
         <div className="quickbar">
           <div className="field">

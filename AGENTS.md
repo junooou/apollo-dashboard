@@ -613,6 +613,46 @@ lists are filtered out; this app only ever tags people) to populate the
 "Existing Apollo list" picker, so repeat runs against the same company can
 land in the list already created for it.
 
+## Find managing company (Lead Sourcing tab)
+
+A collapsible helper inside Stage 1 of the Lead Sourcing tab (`app/page.tsx`,
+state prefixed `manager`), sitting between the main company search row and
+the quick filters. Addresses a gap in the original flow: the visible brand on
+a property — a mall, hotel, office tower — is often not who makes vendor and
+technology decisions for it. That's frequently outsourced to a facilities
+management (FM) company or a real estate management company under contract,
+and the person keying in a prospect frequently doesn't know that company's
+name up front.
+
+`lib/managing-company.ts`'s `findManagingCompany()` takes a free-text
+property/building name and asks OpenAI (`gpt-5.6`, Responses API) to
+identify it, with the `web_search` tool enabled so the answer is grounded in
+real, current sources rather than the model's own guess — unlike every other
+OpenAI call in this app (news trigger scoring, LinkedIn drafts), which score
+or draft from data already supplied in the prompt and don't need live
+lookup. Structured output is still enforced the same way as those other
+calls (`text.format` with a strict `json_schema`).
+
+**"Usually exactly one company per property" is a prompt instruction, not
+a code constraint.** The schema returns a single `managingCompany` plus an
+`alternateCandidates` array for genuinely ambiguous cases, but the prompt
+explicitly tells the model not to hedge with a generic parent group when a
+specific operating entity is identifiable — verified live against Raffles
+City Singapore, which correctly resolved to "CapitaLand Retail Management
+Pte Ltd" (the specific property manager per CICT's management agreement)
+rather than "CapitaLand" or "CapitaLand Integrated Commercial Trust".
+
+**This never calls Apollo and never spends a credit** for the lookup itself.
+The result fills the existing "Company name or domain" field via
+`useManagingCompany()`, which now also calls `handleSearch()` immediately —
+"Use this company" jumps straight to Apollo results rather than requiring a
+separate manual Search click, since the name is already resolved and the
+user reviewed it in the managing-company panel first. `handleSearch` takes
+an optional query-override parameter for this (`app/page.tsx`) so it doesn't
+depend on React state having flushed yet. The existing multi-match
+disambiguation table still appears as normal if the resolved name maps to
+more than one Apollo organization.
+
 ## Colour system
 
 Colour encodes function; it is never decoration (Operate-mode rule).

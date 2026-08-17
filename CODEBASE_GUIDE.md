@@ -13,6 +13,12 @@ people who don't necessarily write code day-to-day. If you're a developer
 looking for the terse, technical version with implementation gotchas, read
 `AGENTS.md` instead — this guide is the friendlier map that points you to it.
 
+**Note:** everything in this guide describes the app as it runs **today**:
+locally, one person at a time, files on local disk. The app is planned to
+move onto AWS for team-wide use — see `AWS_DEPLOYMENT_NOTES.md` for what's
+expected to change structurally when that happens, and update both that file
+and this one when it does.
+
 ---
 
 ## 1. What this project is, in one paragraph
@@ -45,8 +51,13 @@ apollo-dashboard/
 │       ├── credits/        ← Checks how many Apollo credits are left
 │       ├── company/        ← Looks up a company's basic Apollo record
 │       ├── news/           ← Fetches recent news headlines about a company
+│       ├── org-profile/    ← Talks to Apollo: paid firmographic detail (industry, size, funding — 1 credit)
+│       ├── history/        ← Reads back the log of past sourcing runs
 │       ├── export/         ← Builds the downloadable CSV file
 │       ├── sheets/         ← Reads/writes Google Sheets
+│       ├── sheets-index/   ← Status of the cached Voncierge Outreach scan (the header's loading pill)
+│       ├── apollo-labels/  ← Lists/creates Apollo lists ("Tag in Apollo") — 0 credits
+│       ├── job-signals/    ← Live Singapore hiring-signal listings (MyCareersFuture — free, no key)
 │       ├── docs/           ← Saves a generated outreach email as a Google Doc
 │       ├── generate-template/ ← Talks to OpenAI: writes the outreach email sequence
 │       ├── presets/        ← Saves/loads named filter presets
@@ -60,6 +71,7 @@ apollo-dashboard/
 │   ├── enrich.ts           ← Runs the paid reveal step + safety checks (wrong email, wrong company, etc.)
 │   ├── csv.ts              ← Reads/writes CSV files in the company's fixed format
 │   ├── settings.ts         ← Loads/saves the app's settings file
+│   ├── history.ts          ← Logs/reads past sourcing runs (local file — see AWS_DEPLOYMENT_NOTES.md)
 │   ├── presets.ts          ← Loads/saves saved filter presets (from the Simple tab)
 │   ├── persona.ts          ← Builds/parses the "describe who you want" AI prompt (no AI call itself — see below)
 │   ├── taxonomy.ts         ← The fixed lists: departments, seniorities, countries, regions
@@ -67,12 +79,16 @@ apollo-dashboard/
 │   ├── sheets.ts           ← Google Sheets read/write logic
 │   ├── docs.ts             ← Google Docs "save this email" logic
 │   ├── news.ts             ← Fetches company news headlines (Google News RSS, no API key needed)
+│   ├── mycareersfuture.ts  ← MyCareersFuture (SG job portal) client — free, unauthenticated public API
+│   ├── job-signal-scoring.ts ← Deterministic 0–100 hiring-signal score — no AI call, no cost
 │   ├── types.ts            ← Shared TypeScript type definitions (shapes of data)
 │   └── *.test.ts           ← Automated tests, one per major file above
 │
-├── data/                   ← Local files the app reads/writes at runtime (not shipped in git)
-│   ├── settings.json       ← Your saved filter settings
-│   └── presets.json        ← Your saved "Simple" filter presets
+├── data/                   ← Local files the app reads/writes at runtime
+│   ├── settings.json       ← Your saved filter settings (gitignored — local to you)
+│   ├── presets.json        ← Saved "Simple" filter presets (actually tracked in git, shared as a starting point)
+│   ├── runs.json           ← Log of past sourcing runs (gitignored — local to this machine, see Run History below)
+│   └── job-signals-history.json ← Cached Job Signals listings (gitignored — pruned on every refresh, not kept forever)
 │
 ├── scripts/                 ← One-off command-line helper scripts (e.g. "check my Apollo key works")
 ├── criteria.default.json    ← The factory-default filter rules, transcribed from context.md
@@ -84,7 +100,8 @@ apollo-dashboard/
 ├── README.md                  ← Setup instructions + feature walkthrough
 ├── USER_MANUAL.md              ← THIS guide's sibling: how to use the app (non-technical)
 ├── CODEBASE_GUIDE.md            ← This file
-└── GOOGLE_SHEETS_SETUP.md        ← Step-by-step Google Cloud Console setup for Sheets/Docs
+├── AWS_DEPLOYMENT_NOTES.md       ← Running list of what changes when this moves to AWS for the team
+└── GOOGLE_SHEETS_SETUP.md         ← Step-by-step Google Cloud Console setup for Sheets/Docs
 ```
 
 **Rule of thumb for where new code goes:** if it draws something on screen,
@@ -109,14 +126,75 @@ point of view:
    `lib/enrich.ts`. That file calls Apollo's paid reveal endpoint in batches
    of 10, then runs the three safety checks (no email / personal email /
    wrong employer) before handing back a clean contact list.
-4. **Export** — `app/api/export/route.ts` (CSV download) or
-   `app/api/sheets/route.ts` (push to Google Sheet), both built on
-   `lib/csv.ts` and `lib/sheets.ts` respectively.
+4. **Export** — `app/api/export/route.ts` (CSV download),
+   `app/api/sheets/route.ts` (push to Google Sheet), or
+   `app/api/apollo-labels/route.ts` ("Tag in Apollo") — built on `lib/csv.ts`,
+   `lib/sheets.ts`, and `lib/apollo.ts`'s `tagContactsInApollo()`
+   respectively. Tagging is the odd one out: it doesn't write to a local file
+   or a Google resource at all — it writes into Apollo's own CRM, via
+   `POST /contacts/bulk_create`, since Apollo's list endpoints only accept
+   Contact records already saved to the team, not the raw prospect-search
+   results this app sources from. Free (0 credits), but still gated behind a
+   manual click, same reasoning as Push to Sheet: it's visible to the whole
+   team the moment it happens.
+5. **Logging** — the very last thing `app/api/enrich/route.ts` does before
+   responding is call `lib/history.ts`'s `appendRun()`, so every completed run
+   shows up on the `/history` page automatically. This happens regardless of
+   what the user does with the result afterwards (download, push to Sheet, or
+   nothing).
 
 The **Outreach Studio** tab is a separate, shorter flow:
 `app/components/OutreachGenerator.tsx` → `app/api/generate-template/route.ts`
 (calls OpenAI) → optionally `app/api/docs/route.ts` → `lib/docs.ts` (saves to
 Google Docs).
+
+**Company profile** (the optional "Load company profile" button in Step 1) is
+its own small flow, deliberately *not* wired into automatic search: a click
+in `app/page.tsx` calls `app/api/org-profile/route.ts`, which calls
+`enrichOrganization()` in `lib/apollo.ts`. This is a paid Apollo call — 1
+credit, verified live and documented in `AGENTS.md` — so unlike
+news/existing-contacts-check (both free) it never fires on its own when a
+company is selected; it waits for the explicit click.
+
+**The "Voncierge Outreach loaded" pill in the header** is the app warming a
+cache, not a decoration. The moment `app/page.tsx` mounts (i.e. the moment
+you open the app in a browser), it calls `app/api/sheets-index/route.ts`,
+which scans every spreadsheet reachable from the shared Google Drive
+folder — **including subfolders** — and keeps every contact row **in server
+memory** via `warmSheetsIndex()` in `lib/sheets.ts`. The subfolder part
+matters in practice: the real "Voncierge Outreach" drive keeps every actual
+contact sheet inside an "Outreach Sheets" subfolder, not at the top level,
+so `listSpreadsheetsInFolder()` walks subfolders first (`collectFolderIds()`,
+capped at a depth of 4) before asking Google for spreadsheets — a
+direct-children-only version of this function was tried first and silently
+found nothing real. Everything that needs to know "does this company already
+have contacts sourced" afterwards — the Step 1 overview panel, and the
+underlying `GET /api/sheets?checkCompany=` route — reads that cache instead
+of re-scanning Google Sheets each time, which is what makes the check
+near-instant after the first load. Pushing new contacts to a sheet
+automatically drops the cache (`invalidateSheetsIndex()`) so the next check
+re-scans rather than showing stale data; there's also a manual ↻ button on
+the pill for the same purpose. **This cache lives only as long as the
+`npm run dev`/`npm start` process does** — it's not written to disk, and it
+resets on every restart.
+
+**Job Signals** (the fourth workspace tab) is the one feed in this app that
+fetches live on every single page load, no manual button, no cache-only
+default — deliberately different from both the sheets-index pill above and
+News Triggers. The reason is simple: `lib/mycareersfuture.ts` calls a
+genuinely free, unauthenticated public API (Singapore's official
+MyCareersFuture job portal), so there's no credit or credential to protect
+by making the user ask for fresh data. `app/api/job-signals/route.ts`'s
+`GET` always re-fetches, re-filters out recruitment agencies (by SSIC
+industry code — see `AGENTS.md` for how that code was verified), and
+re-scores every listing with `lib/job-signal-scoring.ts` — a plain
+deterministic function, not an AI call, which is exactly what makes it safe
+to run on every load. History is still kept (`data/job-signals-history.json`)
+for "is this new since last time" tracking, but unlike News Triggers'
+history — which keeps every article forever, because a news event stays
+true — job listings that no longer come back from a live fetch are dropped
+from history entirely, because a posting MyCareersFuture stops returning has
+almost certainly been filled or expired.
 
 ---
 
@@ -260,6 +338,10 @@ the change may be wrong, not the test.
   reference and should be read before changing any filtering or enrichment
   logic.
 - **Google Sheets/Docs setup:** see `GOOGLE_SHEETS_SETUP.md`.
+- **What has to change before/during the move to AWS:** see
+  `AWS_DEPLOYMENT_NOTES.md` — add to it whenever you build something that
+  assumes local, single-user operation (a local file, an OS username as an
+  identity, etc.).
 - **The underlying business rules for who counts as a relevant contact:**
   see `context.md` in the parent `voncierge` folder — not part of this
   codebase, but the source of truth `lib/filter.ts` implements.

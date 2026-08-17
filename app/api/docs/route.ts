@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import {
     createCampaignDoc,
     updateCampaignDoc,
+    insertIntoDocTab,
+    listCampaignDocsInFolder,
+    listDocumentTabs,
   } from "@/lib/docs";
 
 type CampaignEmail = {
@@ -13,6 +16,7 @@ type CampaignEmail = {
 
 type SaveCampaignRequest = {
   documentId?: string;
+  tabId?: string;
   campaignName: string;
   scope: "company" | "industry";
   sequenceRationale: string;
@@ -21,6 +25,57 @@ type SaveCampaignRequest = {
   company?: string;
   industry?: string;
 };
+
+export async function GET(request: Request) {
+  try {
+    const { searchParams } = new URL(request.url);
+
+    if (searchParams.has("tabs")) {
+      const documentId = searchParams.get("documentId");
+
+      if (!documentId) {
+        return NextResponse.json(
+          { error: "documentId is required" },
+          { status: 400 },
+        );
+      }
+
+      const tabs = await listDocumentTabs(documentId);
+      return NextResponse.json({ tabs });
+    }
+
+    if (searchParams.has("listFolder")) {
+      const folderId = process.env.GOOGLE_PARENT_FOLDER_ID?.trim();
+
+      if (!folderId) {
+        return NextResponse.json(
+          { error: "GOOGLE_PARENT_FOLDER_ID is not configured." },
+          { status: 500 },
+        );
+      }
+
+      const docs = await listCampaignDocsInFolder(folderId);
+      return NextResponse.json({ docs });
+    }
+
+    return NextResponse.json(
+      { error: "Unsupported query" },
+      { status: 400 },
+    );
+  } catch (error) {
+    console.error("Google Doc listing failed:", error);
+
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Google Doc listing failed",
+      },
+      { status: 500 },
+    );
+  }
+}
 
 export async function POST(request: Request) {
   try {
@@ -62,13 +117,33 @@ export async function POST(request: Request) {
         industry: body.industry,
       };
       
+      if (body.tabId !== undefined) {
+        if (!body.documentId) {
+          return NextResponse.json(
+            { error: "documentId is required when tabId is set" },
+            { status: 400 },
+          );
+        }
+
+        const result = await insertIntoDocTab(
+          body.documentId,
+          body.tabId || undefined,
+          campaign,
+        );
+
+        return NextResponse.json({
+          ...result,
+          updated: true,
+        });
+      }
+
       const result = body.documentId
         ? await updateCampaignDoc(
             body.documentId,
             campaign,
           )
         : await createCampaignDoc(campaign);
-      
+
       return NextResponse.json({
         ...result,
         updated: Boolean(body.documentId),

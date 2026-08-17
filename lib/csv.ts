@@ -55,6 +55,26 @@ export function contactsToRows(
   return { columns, rows };
 }
 
+/**
+ * Same 10-column contact row plus three columns specific to the "Job
+ * Signals Outreach" Google Sheet (lib/sheets.ts): which job listing
+ * surfaced this contact, and which persona rule picked them (see
+ * lib/job-signal-persona.ts). Extends `contactsToRows`'s output rather than
+ * modifying it, so the fixed 10-column CSV schema in `Apollo Lead
+ * Generation/` is untouched — same precedent as `ensureLinkedinTrackingColumns`
+ * only ever extending a sheet's own header.
+ */
+export function jobSignalContactsToRows(
+  contacts: EnrichedContact[],
+  meta: { jobTitle: string; jobUrl: string; outreachPersona: string },
+): { columns: string[]; rows: string[][] } {
+  const { columns, rows } = contactsToRows(contacts);
+  return {
+    columns: [...columns, "job_title", "job_url", "outreach_persona"],
+    rows: rows.map((row) => [...row, meta.jobTitle, meta.jobUrl, meta.outreachPersona]),
+  };
+}
+
 export function buildCsv(
   contacts: EnrichedContact[],
   opts: { includePhone?: boolean } = {},

@@ -50,23 +50,86 @@ export async function readRange(spreadsheetId: string, range: string): Promise<s
   return (res.data.values as string[][] | undefined) ?? [];
 }
 
-/** Lists spreadsheets directly inside a folder (or Shared Drive) — powers the "Push to Sheet" picker. */
-export async function listSpreadsheetsInFolder(
-  folderId: string,
-): Promise<{ id: string; name: string }[]> {
+function getDriveReadClient() {
   const { email, privateKey } = loadCredentials();
   const auth = new google.auth.JWT({
     email,
     key: privateKey,
     scopes: ["https://www.googleapis.com/auth/drive.readonly"],
   });
-  const drive = google.drive({ version: "v3", auth });
+  return google.drive({ version: "v3", auth });
+}
+
+/**
+ * How many folder levels deep to look for spreadsheets, below `folderId`
+ * itself. Verified live (2026-08-13): the real "Voncierge Outreach" shared
+ * drive keeps every sourced-contact sheet one level down, inside an
+ * "Outreach Sheets" subfolder — only an ad-hoc test spreadsheet sat at the
+ * drive's own root. A depth of 1 was silently finding nothing real; this
+ * cap is generous headroom above the one level actually observed in use,
+ * not a guess at what depth is needed.
+ */
+const MAX_FOLDER_DEPTH = 4;
+
+/** Every subfolder ID directly inside `parentId`. */
+async function listSubfolders(
+  drive: ReturnType<typeof getDriveReadClient>,
+  parentId: string,
+): Promise<string[]> {
   const res = await drive.files.list({
-    q: `'${folderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`,
+    q: `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    fields: "files(id)",
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "allDrives",
+  });
+  return (res.data.files ?? []).map((f) => f.id!).filter(Boolean);
+}
+
+/**
+ * `rootId` plus every folder ID reachable underneath it — a breadth-first
+ * walk capped at `MAX_FOLDER_DEPTH` so a pathological folder structure can't
+ * cause runaway recursion. Needed because the shared Drive folder this app
+ * points at is not flat: real contact sheets live inside a subfolder, not
+ * directly in the folder configured as GOOGLE_PARENT_FOLDER_ID.
+ */
+async function collectFolderIds(
+  drive: ReturnType<typeof getDriveReadClient>,
+  rootId: string,
+): Promise<string[]> {
+  const all = [rootId];
+  let frontier = [rootId];
+
+  for (let depth = 0; depth < MAX_FOLDER_DEPTH && frontier.length > 0; depth++) {
+    const children = await Promise.all(frontier.map((id) => listSubfolders(drive, id)));
+    frontier = children.flat();
+    all.push(...frontier);
+  }
+
+  return all;
+}
+
+/**
+ * Lists every spreadsheet inside a folder (or Shared Drive) OR any of its
+ * subfolders — powers both the "Push to Sheet" picker and the existing-
+ * contacts scan. Recurses because the real shared Drive this app targets
+ * organizes sheets inside a subfolder rather than at the top level; a
+ * direct-children-only query silently misses everything real.
+ */
+export async function listSpreadsheetsInFolder(
+  folderId: string,
+): Promise<{ id: string; name: string }[]> {
+  const drive = getDriveReadClient();
+  const folderIds = await collectFolderIds(drive, folderId);
+
+  const parentClause = folderIds.map((id) => `'${id}' in parents`).join(" or ");
+  const res = await drive.files.list({
+    q: `(${parentClause}) and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`,
     fields: "files(id, name)",
     orderBy: "name",
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
+    corpora: "allDrives",
   });
   return (res.data.files ?? []).map((f) => ({ id: f.id!, name: f.name! }));
 }
@@ -99,31 +162,33 @@ export type SheetContact = {
   firstname: string;
   lastname: string;
   title: string;
+  company: string;
   email: string;
   linkedinUrl: string;
   apolloPersonId: string;
   sheetId: string;
   sheetName: string;
+  /** Present only if the sheet already has a `seniority` column (part of the
+   *  standard 10-column CSV schema, but unused by this type until now). */
+  seniority?: string;
+  /** Present only if the sheet already has a `location` column. */
+  location?: string;
+  /** 1-based row number within `sheetId`'s first tab (header is row 1) — lets
+   *  a later write (e.g. marking a LinkedIn send) target this exact row
+   *  without re-searching the sheet. */
+  rowIndex: number;
+  /** Present only if the sheet already has a `linkedin_status` column. */
+  linkedinStatus?: string;
+  /** Present only if the sheet already has a `linkedin_sent_at` column. */
+  linkedinSentAt?: string;
 };
 
-/**
- * Scans every spreadsheet in `folderId` and returns every row whose company
- * column fuzzy-matches `companyName` — full contact detail, not just a
- * count. Many sheets (especially ones built by hand, or pushed before this
- * app tracked apollo_person_id) have no id column at all, so this matches on
- * the company column instead — the one column every contact sheet has.
- */
-export async function findContactsForCompany(
-  folderId: string,
-  companyName: string,
+/** Reads every row of every spreadsheet in `folderId` — the expensive part
+ *  `findContactsForCompany` used to redo on every single company check.
+ *  Unfiltered by company; filtering happens in-memory once this is cached. */
+async function scanAllContacts(
+  sheetsList: { id: string; name: string }[],
 ): Promise<SheetContact[]> {
-  let sheetsList: { id: string; name: string }[];
-  try {
-    sheetsList = await listSpreadsheetsInFolder(folderId);
-  } catch {
-    return [];
-  }
-
   const perSheet = await Promise.all(
     sheetsList.map(async (s): Promise<SheetContact[]> => {
       try {
@@ -140,22 +205,37 @@ export async function findContactsForCompany(
         const emailCol = header.indexOf("email");
         const linkedinCol = header.indexOf("linkedin_url");
         const idCol = header.indexOf("apollo_person_id");
+        const statusCol = header.indexOf("linkedin_status");
+        const sentAtCol = header.indexOf("linkedin_sent_at");
+        const seniorityCol = header.indexOf("seniority");
+        const locationCol = header.indexOf("location");
 
         const out: SheetContact[] = [];
-        for (const row of values.slice(1)) {
+        values.slice(1).forEach((row, i) => {
           const cell = row[companyCol]?.trim() ?? "";
-          if (!cell || !companyNamesMatch(cell, companyName)) continue;
+          if (!cell) return;
+          const status = statusCol >= 0 ? (row[statusCol] ?? "").trim() : "";
+          const sentAt = sentAtCol >= 0 ? (row[sentAtCol] ?? "").trim() : "";
+          const seniority = seniorityCol >= 0 ? (row[seniorityCol] ?? "").trim() : "";
+          const location = locationCol >= 0 ? (row[locationCol] ?? "").trim() : "";
           out.push({
             firstname: firstnameCol >= 0 ? (row[firstnameCol] ?? "").trim() : "",
             lastname: lastnameCol >= 0 ? (row[lastnameCol] ?? "").trim() : "",
             title: titleCol >= 0 ? (row[titleCol] ?? "").trim() : "",
+            company: cell,
             email: emailCol >= 0 ? (row[emailCol] ?? "").trim() : "",
             linkedinUrl: linkedinCol >= 0 ? (row[linkedinCol] ?? "").trim() : "",
             apolloPersonId: idCol >= 0 ? (row[idCol] ?? "").trim() : "",
             sheetId: s.id,
             sheetName: s.name,
+            // Header is row 1, so the Nth data row (0-based `i`) sits at sheet row i+2.
+            rowIndex: i + 2,
+            ...(status ? { linkedinStatus: status } : {}),
+            ...(sentAt ? { linkedinSentAt: sentAt } : {}),
+            ...(seniority ? { seniority } : {}),
+            ...(location ? { location } : {}),
           });
-        }
+        });
         return out;
       } catch {
         return []; // A single unreadable sheet shouldn't fail the whole scan.
@@ -164,6 +244,111 @@ export async function findContactsForCompany(
   );
 
   return perSheet.flat();
+}
+
+export type SheetsIndex = {
+  sheets: { id: string; name: string }[];
+  contacts: SheetContact[];
+  loadedAt: string;
+};
+
+/**
+ * In-memory, process-lifetime cache of every contact across every
+ * spreadsheet in the shared Drive folder. Exists so a company check doesn't
+ * re-scan the whole folder (potentially dozens of sheets, thousands of rows)
+ * on every single search — it scans once, then every check after that is a
+ * plain in-memory filter.
+ *
+ * Scope: this cache lives for the life of ONE running `npm run dev` / `npm
+ * start` process, on ONE machine. It is not shared between colleagues each
+ * running their own local copy — see AWS_DEPLOYMENT_NOTES.md for what that
+ * means once this app runs as a shared AWS deployment.
+ */
+let cache: SheetsIndex | null = null;
+let warmingPromise: Promise<SheetsIndex> | null = null;
+
+/**
+ * Populates (or returns the already-populated) sheets index. Concurrent
+ * callers during the initial scan share the same in-flight promise rather
+ * than each kicking off their own — matters because the app's header
+ * (app/page.tsx) and any in-flight "existing contacts" check can both land
+ * here within the same first second after the app loads.
+ */
+export async function warmSheetsIndex(folderId: string, force = false): Promise<SheetsIndex> {
+  if (cache && !force) return cache;
+  if (warmingPromise) return warmingPromise;
+
+  warmingPromise = (async () => {
+    const sheetsList = await listSpreadsheetsInFolder(folderId);
+    const contacts = await scanAllContacts(sheetsList);
+    const index: SheetsIndex = { sheets: sheetsList, contacts, loadedAt: new Date().toISOString() };
+    cache = index;
+    return index;
+  })();
+
+  try {
+    return await warmingPromise;
+  } finally {
+    warmingPromise = null;
+  }
+}
+
+/** Synchronous peek at the current cache, without triggering a scan. */
+export function getCachedSheetsIndex(): SheetsIndex | null {
+  return cache;
+}
+
+/**
+ * Drops the cache so the next read re-scans from Google. Call this after any
+ * write that changes what's in the folder (a new sheet, a push of new
+ * contacts) — otherwise "already sourced" checks would keep reporting
+ * pre-write data until the server restarts.
+ */
+export function invalidateSheetsIndex(): void {
+  cache = null;
+}
+
+/**
+ * Every contact whose company column fuzzy-matches `companyName`, across
+ * every spreadsheet in `folderId`. Uses the warm cache when available —
+ * effectively instant after the first scan — and transparently falls back to
+ * a fresh live scan on a cache miss or read failure, so this keeps working
+ * even if the startup warm-up never ran or failed.
+ */
+export async function findContactsForCompany(
+  folderId: string,
+  companyName: string,
+): Promise<SheetContact[]> {
+  let index: SheetsIndex;
+  try {
+    index = await warmSheetsIndex(folderId);
+  } catch {
+    return [];
+  }
+
+  return index.contacts.filter((c) => companyNamesMatch(c.company, companyName));
+}
+
+/**
+ * Every distinct company name across the warm index, deduped
+ * case-insensitively but keeping the first-seen casing (so "OCBC" doesn't
+ * get silently rewritten to "ocbc"). Powers the LinkedIn Drafts company
+ * picker — it only ever needs to offer companies that already have a sheet.
+ */
+export async function listCompaniesFromIndex(folderId: string): Promise<string[]> {
+  let index: SheetsIndex;
+  try {
+    index = await warmSheetsIndex(folderId);
+  } catch {
+    return [];
+  }
+
+  const seen = new Map<string, string>();
+  for (const c of index.contacts) {
+    const key = c.company.trim().toLowerCase();
+    if (key && !seen.has(key)) seen.set(key, c.company.trim());
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b));
 }
 
 /** Appends rows after the last row with data in `range`'s sheet. */
@@ -203,6 +388,225 @@ export async function updateRange(
     updatedRange: res.data.updatedRange ?? undefined,
     updatedCells: res.data.updatedCells ?? undefined,
   };
+}
+
+/** "A" for 0, "B" for 1, ... "Z" for 25, "AA" for 26, matching Sheets' own column labels. */
+function columnLetter(index0: number): string {
+  let n = index0 + 1;
+  let s = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+/** Per-spreadsheet cache of the first tab's internal numeric id (gid) — needed
+ *  for cell-formatting requests, which address a sheet by gid, not by name or
+ *  index. Safe to cache for the process lifetime: a tab's gid doesn't change
+ *  unless the tab itself is deleted and recreated. */
+const sheetGidCache = new Map<string, number>();
+
+async function getFirstSheetId(spreadsheetId: string): Promise<number> {
+  const cached = sheetGidCache.get(spreadsheetId);
+  if (cached !== undefined) return cached;
+
+  const sheets = getClient();
+  const res = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets.properties(sheetId,index)",
+  });
+  const first = res.data.sheets?.find((s) => s.properties?.index === 0);
+  const gid = first?.properties?.sheetId ?? 0;
+  sheetGidCache.set(spreadsheetId, gid);
+  return gid;
+}
+
+/** Sets a solid background color on one cell via `batchUpdate`'s `repeatCell`
+ *  — the values.* endpoints used elsewhere in this file only ever touch cell
+ *  *values*, never formatting, so this is a distinct code path. */
+async function formatCellBackground(
+  spreadsheetId: string,
+  sheetGid: number,
+  rowIndex0: number,
+  colIndex0: number,
+  color: { red: number; green: number; blue: number },
+): Promise<void> {
+  const sheets = getClient();
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          repeatCell: {
+            range: {
+              sheetId: sheetGid,
+              startRowIndex: rowIndex0,
+              endRowIndex: rowIndex0 + 1,
+              startColumnIndex: colIndex0,
+              endColumnIndex: colIndex0 + 1,
+            },
+            cell: { userEnteredFormat: { backgroundColor: color } },
+            fields: "userEnteredFormat.backgroundColor",
+          },
+        },
+      ],
+    },
+  });
+}
+
+/**
+ * Finds (or creates) a pair of tracking columns on a sheet — an "anchor"
+ * column that must already exist (e.g. `linkedin_url`, `email`) plus a
+ * status/timestamp pair appended to the header row if they don't exist yet.
+ * Shared by `markLinkedinContactSent` and `markJobSignalContacted` — both
+ * record a manual "I did the outreach" confirmation, differing only in
+ * which columns they touch. Separate from the fixed 10-column CSV schema in
+ * `lib/csv.ts` — this only ever extends a sheet's own header, never touches
+ * what `contactsToRows` writes, so it can't drift the local-CSV schema
+ * AGENTS.md pins in place.
+ */
+async function ensureTrackingColumns(
+  spreadsheetId: string,
+  anchorColumn: string,
+  statusColumn: string,
+  sentAtColumn: string,
+): Promise<{ anchorCol: number; statusCol: number; sentAtCol: number }> {
+  const headerRows = await readRange(spreadsheetId, "A1:Z1");
+  const header = (headerRows[0] ?? []).map((h) => (h ?? "").trim().toLowerCase());
+
+  const anchorCol = header.indexOf(anchorColumn);
+  if (anchorCol < 0) {
+    throw new Error(`This sheet has no ${anchorColumn} column — cannot track a send here.`);
+  }
+
+  let statusCol = header.indexOf(statusColumn);
+  let sentAtCol = header.indexOf(sentAtColumn);
+
+  if (statusCol < 0 || sentAtCol < 0) {
+    const nextCol = header.length;
+    const newHeaders: string[] = [];
+    if (statusCol < 0) {
+      statusCol = nextCol + newHeaders.length;
+      newHeaders.push(statusColumn);
+    }
+    if (sentAtCol < 0) {
+      sentAtCol = nextCol + newHeaders.length;
+      newHeaders.push(sentAtColumn);
+    }
+    const startLetter = columnLetter(nextCol);
+    const endLetter = columnLetter(nextCol + newHeaders.length - 1);
+    await updateRange(spreadsheetId, `${startLetter}1:${endLetter}1`, [newHeaders]);
+  }
+
+  return { anchorCol, statusCol, sentAtCol };
+}
+
+/** Pale green — visible against both light and dark Sheets themes without
+ *  reading as an error/warning color. */
+const CONTACTED_GREEN = { red: 0.78, green: 0.91, blue: 0.8 };
+
+/**
+ * Records a manual "I sent this LinkedIn connection request" confirmation:
+ * writes `linkedin_status`/`linkedin_sent_at` into the contact's row (adding
+ * those columns first if the sheet doesn't have them yet) and shades the
+ * `linkedin_url` cell green. There is no LinkedIn API that can verify a send
+ * actually happened — this is a trusted manual confirmation, the same trust
+ * model as the rest of this app's human-in-the-loop steps.
+ */
+export async function markLinkedinContactSent(
+  spreadsheetId: string,
+  rowIndex: number,
+): Promise<{ sentAt: string }> {
+  const { anchorCol, statusCol, sentAtCol } = await ensureTrackingColumns(
+    spreadsheetId,
+    "linkedin_url",
+    "linkedin_status",
+    "linkedin_sent_at",
+  );
+  const sentAt = new Date().toISOString().slice(0, 10);
+
+  const statusLetter = columnLetter(statusCol);
+  const sentAtLetter = columnLetter(sentAtCol);
+  await updateRange(spreadsheetId, `${statusLetter}${rowIndex}:${statusLetter}${rowIndex}`, [["Sent"]]);
+  await updateRange(spreadsheetId, `${sentAtLetter}${rowIndex}:${sentAtLetter}${rowIndex}`, [[sentAt]]);
+
+  const gid = await getFirstSheetId(spreadsheetId);
+  await formatCellBackground(spreadsheetId, gid, rowIndex - 1, anchorCol, CONTACTED_GREEN);
+
+  return { sentAt };
+}
+
+/**
+ * Same manual-confirmation pattern as `markLinkedinContactSent`, for the
+ * "Job Signals Outreach" sheet (see `getOrCreateJobSignalOutreachSheet`).
+ * Anchors on `email` rather than `linkedin_url` because a Job Signals
+ * contact was reached through whichever channel (email or LinkedIn) the
+ * user actually used — the sheet doesn't track which, same trust model as
+ * the rest of this app's "Mark as Sent" buttons.
+ */
+export async function markJobSignalContacted(
+  spreadsheetId: string,
+  rowIndex: number,
+): Promise<{ contactedAt: string }> {
+  const { anchorCol, statusCol, sentAtCol } = await ensureTrackingColumns(
+    spreadsheetId,
+    "email",
+    "outreach_status",
+    "contacted_at",
+  );
+  const contactedAt = new Date().toISOString().slice(0, 10);
+
+  const statusLetter = columnLetter(statusCol);
+  const sentAtLetter = columnLetter(sentAtCol);
+  await updateRange(spreadsheetId, `${statusLetter}${rowIndex}:${statusLetter}${rowIndex}`, [
+    ["Contacted"],
+  ]);
+  await updateRange(spreadsheetId, `${sentAtLetter}${rowIndex}:${sentAtLetter}${rowIndex}`, [
+    [contactedAt],
+  ]);
+
+  const gid = await getFirstSheetId(spreadsheetId);
+  await formatCellBackground(spreadsheetId, gid, rowIndex - 1, anchorCol, CONTACTED_GREEN);
+
+  return { contactedAt };
+}
+
+/** Name of the single running sheet every Job Signals-sourced contact gets
+ *  appended to, across all companies — one running log rather than a sheet
+ *  per employer, so "who have we already contacted" is a single scan
+ *  (product decision, not a technical constraint). */
+export const JOB_SIGNAL_OUTREACH_SHEET_NAME = "Job Signals Outreach";
+
+/** Cached per-process once resolved, same lifetime rule as `sheetGidCache` —
+ *  the sheet is found-or-created at most once per server process. */
+let cachedJobSignalOutreachSheetId: string | null = null;
+
+/**
+ * Finds the "Job Signals Outreach" spreadsheet in `parentFolderId`, or
+ * creates it if this is the first time anyone has saved a Job Signals
+ * contact. `GOOGLE_JOB_SIGNALS_SHEET_ID` skips the lookup entirely when set
+ * (e.g. if the sheet was created by hand and moved somewhere the folder
+ * scan wouldn't find it).
+ */
+export async function getOrCreateJobSignalOutreachSheet(parentFolderId: string): Promise<string> {
+  const envId = process.env.GOOGLE_JOB_SIGNALS_SHEET_ID?.trim();
+  if (envId) return envId;
+  if (cachedJobSignalOutreachSheetId) return cachedJobSignalOutreachSheetId;
+
+  const existing = await listSpreadsheetsInFolder(parentFolderId);
+  const found = existing.find((s) => s.name === JOB_SIGNAL_OUTREACH_SHEET_NAME);
+  if (found) {
+    cachedJobSignalOutreachSheetId = found.id;
+    return found.id;
+  }
+
+  const { spreadsheetId } = await createSpreadsheet(JOB_SIGNAL_OUTREACH_SHEET_NAME, ["Sheet1"], {
+    parentFolderId,
+  });
+  cachedJobSignalOutreachSheetId = spreadsheetId;
+  return spreadsheetId;
 }
 
 /**

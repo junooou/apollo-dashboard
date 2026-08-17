@@ -230,6 +230,29 @@ header.top h1 {
   font-weight: 600;
 }
 
+/* Inline re-scan control inside the Voncierge Outreach pill — deliberately
+   not a full `button` (no border/background of its own) so it reads as part
+   of the pill, not a separate control competing for attention. */
+.pill-refresh {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0 0 0 2px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: inherit;
+  line-height: 1;
+}
+
+.pill-refresh:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.pill-refresh:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 section.panel {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -3216,4 +3239,107 @@ section:has(> div > h2:first-child) {
     font-weight: 740;
     letter-spacing: 0.06em;
     text-transform: uppercase;
+  }
+
+  /* ------------------------------------------------------------------------
+     JOB SIGNALS — HIRING OVERVIEW
+     "What companies are hiring for" panel: role/company breakdown bars.
+     Reuses .panel and the same tokens (--text/--muted/--border/--accent) as
+     the rest of the app rather than introducing new colors.
+     ------------------------------------------------------------------------ */
+
+  .job-signal-summary {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .job-signal-overview {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+
+    margin-bottom: 18px;
+  }
+
+  .job-signal-overview-head h3 {
+    margin: 0 0 4px;
+
+    font-size: 0.95rem;
+    font-weight: 680;
+  }
+
+  .job-signal-overview-head p {
+    margin: 0;
+
+    max-width: 760px;
+    line-height: 1.5;
+  }
+
+  .job-signal-overview-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+  }
+
+  .job-signal-overview-col {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .job-signal-bar-list {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .job-signal-bar-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(60px, 90px) 22px;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .job-signal-bar-label {
+    overflow: hidden;
+
+    color: var(--text);
+
+    font-size: 0.78rem;
+    font-weight: 560;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .job-signal-bar-track {
+    height: 6px;
+
+    overflow: hidden;
+
+    background: var(--border);
+    border-radius: 999px;
+  }
+
+  .job-signal-bar-fill {
+    height: 100%;
+
+    background: var(--accent);
+    border-radius: 999px;
+  }
+
+  .job-signal-bar-count {
+    color: var(--muted);
+
+    font-size: 0.74rem;
+    font-weight: 640;
+    text-align: right;
+  }
+
+  @media (max-width: 850px) {
+    .job-signal-summary {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .job-signal-overview-grid {
+      grid-template-columns: 1fr;
+    }
   }

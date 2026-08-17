@@ -6,9 +6,14 @@ import { DeptChip } from "./components/DeptChip";
 import OutreachGenerator, {
   type OutreachPrefill,
 } from "./components/OutreachGenerator";
+import LinkedInDraftGenerator from "./components/LinkedInDraftGenerator";
+import JobSignalOutreachView, {
+  type JobSignalOutreachTarget,
+} from "./components/JobSignalOutreachView";
 import {
   AlertCircle,
   AlertTriangle,
+  BarChart,
   Building,
   Check,
   Download,
@@ -19,6 +24,8 @@ import {
   Save,
   Search,
   Sliders,
+  Sparkle,
+  Tag,
   Upload,
   Users,
 } from "./components/Icons";
@@ -33,11 +40,13 @@ import {
 import type {
   EnrichedContact,
   Organization,
+  OrganizationProfile,
   RunSummary,
   ScoredCandidate,
   Settings,
 } from "@/lib/types";
 import type { NewsItem } from "@/lib/news";
+import type { ManagingCompanyResult } from "@/lib/managing-company";
 
 type ExistingContactMatch = { sheetId: string; sheetName: string; count: number };
 type ExistingContact = {
@@ -121,11 +130,82 @@ function formatNewsTriggerDate(value: string) {
   });
 }
 
+type JobSignalScore = {
+  relevanceScore: number;
+  isTargetCompany: boolean;
+  /** true = confirmed not collated anywhere in the Voncierge Outreach Google
+   *  Sheets; false = found there; null = Sheets export isn't configured, so
+   *  this can't be determined. */
+  isNewLead: boolean | null;
+  /** True for a frontline/operational CX title — concierge, guest relations,
+   *  front desk — a live signal of the manpower-dependent service gap
+   *  Voncierge targets, distinct from a senior decision-maker hire. */
+  isFrontlineSignal: boolean;
+  whyRelevant: string;
+  suggestedOutreachAngle: string;
+  recommendedAction: "generate_outreach" | "watch";
+};
+
+type JobSignal = {
+  uuid: string;
+  title: string;
+  jobUrl: string;
+  postedDate: string;
+  positionLevel: string | null;
+  employmentType: string | null;
+  company: {
+    uen: string;
+    name: string;
+    employeeCount: number | null;
+    ssicCode: string | null;
+  };
+  department: string;
+  score: JobSignalScore;
+  firstSeenAt: string;
+  isNew: boolean;
+};
+
+type JobSignalOverviewRow = { label: string; count: number };
+
+type JobSignalOverview = {
+  roleBreakdown: JobSignalOverviewRow[];
+  topCompanies: JobSignalOverviewRow[];
+  frontlineSignals: number;
+  postedThisWeek: number;
+};
+
+type JobSignalResponse = {
+  opportunities: JobSignal[];
+  watching: JobSignal[];
+  overview?: JobSignalOverview;
+  counts: {
+    totalListings: number;
+    opportunities: number;
+    watching: number;
+    newListings: number;
+    targetCompanyHits: number;
+    newLeads: number;
+  };
+  cache?: { lastRefreshAt: string | null };
+  sheetsConfigured?: boolean;
+  error?: string;
+};
+
+function formatJobSignalDate(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-SG", { day: "numeric", month: "short", year: "numeric" });
+}
+
 type Stage = "idle" | "searching" | "review" | "enriching" | "done";
 
 export default function Dashboard() {
-  const [workspace, setWorkspace] = useState<"leads" | "outreach" | "news">("leads");
+  const [workspace, setWorkspace] = useState<"leads" | "outreach" | "news" | "jobs">("leads");
   const [outreachPrefill, setOutreachPrefill] = useState<OutreachPrefill | null>(null);
+  const [outreachChannel, setOutreachChannel] = useState<"email" | "linkedin">("email");
+  const [jobSignalOutreachTarget, setJobSignalOutreachTarget] =
+    useState<JobSignalOutreachTarget | null>(null);
   const [company, setCompany] = useState("");
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -137,6 +217,17 @@ export default function Dashboard() {
    * below a form that has already done its job. Reopening it is one click.
    */
   const [searchOpen, setSearchOpen] = useState(true);
+
+  // "Find managing company" — the visible brand on a property (mall, hotel,
+  // building) is often not who makes vendor/tech decisions; that's frequently
+  // outsourced to a facilities management or real estate company instead.
+  // This looks that company up via OpenAI so it can be fed into the company
+  // search above, rather than requiring the user to already know it.
+  const [managerOpen, setManagerOpen] = useState(false);
+  const [managerQuery, setManagerQuery] = useState("");
+  const [managerLoading, setManagerLoading] = useState(false);
+  const [managerError, setManagerError] = useState<string | null>(null);
+  const [managerResult, setManagerResult] = useState<ManagingCompanyResult | null>(null);
 
   const [candidates, setCandidates] = useState<ScoredCandidate[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -190,6 +281,20 @@ export default function Dashboard() {
   const [creatingSheet, setCreatingSheet] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
+  // Tag in Apollo — creates/dedupes the reviewed contacts as Apollo Contacts
+  // and adds them to a named Apollo list ("label"), 0 credits. Existing list
+  // names are offered as a picker so repeat runs land in the same list.
+  const [labelOpen, setLabelOpen] = useState(false);
+  const [apolloLabels, setApolloLabels] = useState<{ name: string; count: number }[]>([]);
+  const [labelsLoading, setLabelsLoading] = useState(false);
+  const [labelsError, setLabelsError] = useState<string | null>(null);
+  const [labelMode, setLabelMode] = useState<"existing" | "new">("new");
+  const [selectedLabelName, setSelectedLabelName] = useState("");
+  const [newLabelName, setNewLabelName] = useState("");
+  const [tagging, setTagging] = useState(false);
+  const [tagResult, setTagResult] = useState<string | null>(null);
+  const [tagAppUrl, setTagAppUrl] = useState<string | null>(null);
+
   // Company overview — latest news (Google News RSS) and a check for
   // contacts already logged for this company across the Sheets folder.
   // Both fire as soon as a company resolves, independent of the people search.
@@ -206,6 +311,12 @@ export default function Dashboard() {
   const [existingLoading, setExistingLoading] = useState(false);
   const [existingError, setExistingError] = useState<string | null>(null);
 
+  // Company profile — industry, size, HQ, funding — from Apollo's org-enrich
+  // endpoint. Fires alongside news/existing-contacts, but only when a domain
+  // is known (mixed_companies/search results without one can't be enriched).
+  const [orgProfile, setOrgProfile] = useState<OrganizationProfile | null>(null);
+  const [orgProfileLoading, setOrgProfileLoading] = useState(false);
+  const [orgProfileError, setOrgProfileError] = useState<string | null>(null);
 
   // News Triggers — reads the cached, AI-scored trigger feed by default.
   // Browser refreshes do not spend Currents or OpenAI requests.
@@ -221,6 +332,62 @@ export default function Dashboard() {
   const [newsTriggersError, setNewsTriggersError] = useState<string | null>(null);
   const [showIgnoredNews, setShowIgnoredNews] = useState(false);
 
+  // Job Signals — MyCareersFuture is a free, unauthenticated public API, so
+  // unlike News Triggers this fetches live on every mount/refresh rather
+  // than waiting for a manual, cost-aware "refresh" click. See the mount
+  // effect below.
+  const [jobSignals, setJobSignals] = useState<JobSignal[]>([]);
+  const [watchingJobSignals, setWatchingJobSignals] = useState<JobSignal[]>([]);
+  const [jobSignalCounts, setJobSignalCounts] = useState<JobSignalResponse["counts"] | null>(null);
+  const [jobSignalOverview, setJobSignalOverview] = useState<JobSignalOverview | null>(null);
+  const [jobSignalCache, setJobSignalCache] = useState<JobSignalResponse["cache"] | null>(null);
+  const [jobSignalsSheetsConfigured, setJobSignalsSheetsConfigured] = useState<boolean | null>(
+    null,
+  );
+  const [jobSignalsLoading, setJobSignalsLoading] = useState(true);
+  const [jobSignalsLoaded, setJobSignalsLoaded] = useState(false);
+  const [jobSignalsError, setJobSignalsError] = useState<string | null>(null);
+  const [showWatchingJobSignals, setShowWatchingJobSignals] = useState(false);
+  /** "New companies only" toggle beside Refresh — narrows the feed to
+   *  listings at companies not collated anywhere in the Voncierge Outreach
+   *  Google Sheets (score.isNewLead). */
+  const [newLeadsOnly, setNewLeadsOnly] = useState(false);
+
+  const loadJobSignals = useCallback(async () => {
+    setJobSignalsLoading(true);
+    setJobSignalsError(null);
+    try {
+      const res = await fetch("/api/job-signals", { cache: "no-store" });
+      const data = (await res.json()) as JobSignalResponse;
+      if (!res.ok || data.error) {
+        throw new Error(data.error ?? `Job signals request failed (${res.status})`);
+      }
+      setJobSignals(data.opportunities ?? []);
+      setWatchingJobSignals(data.watching ?? []);
+      setJobSignalCounts(data.counts ?? null);
+      setJobSignalOverview(data.overview ?? null);
+      setJobSignalCache(data.cache ?? null);
+      setJobSignalsSheetsConfigured(data.sheetsConfigured ?? null);
+      setJobSignalsLoaded(true);
+    } catch (err) {
+      setJobSignalsError(err instanceof Error ? err.message : "Failed to load job signals");
+    } finally {
+      setJobSignalsLoading(false);
+    }
+  }, []);
+
+  function handleExploreOutreachFromJobSignal(signal: JobSignal) {
+    setJobSignalOutreachTarget({
+      title: signal.title,
+      jobUrl: signal.jobUrl,
+      postedDate: formatJobSignalDate(signal.postedDate),
+      company: signal.company,
+      department: signal.department,
+      isFrontlineSignal: signal.score.isFrontlineSignal,
+      whyRelevant: signal.score.whyRelevant,
+    });
+  }
+
   useEffect(() => {
     setExistingContactsOpen(false);
 
@@ -229,6 +396,8 @@ export default function Dashboard() {
       setNewsError(null);
       setExistingContacts(null);
       setExistingError(null);
+      setOrgProfile(null);
+      setOrgProfileError(null);
       return;
     }
 
@@ -268,11 +437,35 @@ export default function Dashboard() {
         if (!cancelled) setExistingLoading(false);
       });
 
+    // Company profile is NOT fetched here. Unlike news/existing-contacts
+    // (both free — Google News RSS and a Google Sheets read), organizations/enrich
+    // costs 1 Apollo credit per call, verified live (2026-08-13). Firing it
+    // automatically on every company selection would spend shared team credits
+    // without asking, which is exactly what AGENTS.md's credit-gate rule
+    // forbids — so it only runs when the user clicks "Load company profile".
+    setOrgProfile(null);
+    setOrgProfileError(null);
+
     return () => {
       cancelled = true;
     };
   }, [selectedOrg]);
 
+  const loadOrgProfile = useCallback(() => {
+    if (!selectedOrg?.domain) return;
+    setOrgProfileLoading(true);
+    setOrgProfileError(null);
+    fetch(`/api/org-profile?domain=${encodeURIComponent(selectedOrg.domain)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.error) throw new Error(d.error);
+        setOrgProfile(d.profile);
+      })
+      .catch((err) => {
+        setOrgProfileError(err instanceof Error ? err.message : "Failed to load company profile");
+      })
+      .finally(() => setOrgProfileLoading(false));
+  }, [selectedOrg]);
 
   const loadNewsTriggers = useCallback(async (refresh = false) => {
     if (refresh) {
@@ -331,8 +524,56 @@ export default function Dashboard() {
     }
   }, []);
 
+  // Voncierge Outreach sheets index — this mount-time fetch is what actually
+  // triggers the scan (see /api/sheets-index): every spreadsheet in the
+  // shared Drive folder, read once and cached in-memory server-side so every
+  // "already sourced" check afterwards is instant instead of re-scanning.
+  const [sheetsIndexLoading, setSheetsIndexLoading] = useState(true);
+  const [sheetsIndexStatus, setSheetsIndexStatus] = useState<{
+    configured: boolean;
+    sheetCount?: number;
+    contactCount?: number;
+    loadedAt?: string;
+    error?: string;
+  } | null>(null);
+
+  const refreshSheetsIndex = useCallback(async (force = false) => {
+    setSheetsIndexLoading(true);
+    try {
+      const res = await fetch(`/api/sheets-index${force ? "?force=1" : ""}`);
+      const data = await res.json();
+      setSheetsIndexStatus(data);
+    } catch (err) {
+      setSheetsIndexStatus({
+        configured: true,
+        error: err instanceof Error ? err.message : "Failed to load",
+      });
+    } finally {
+      setSheetsIndexLoading(false);
+    }
+  }, []);
+
+  /**
+   * Job Signals' "new lead" flag is only trustworthy once the Voncierge
+   * Outreach Sheets index has actually loaded — an empty/stale index would
+   * make every company look new. So the very first job-signals fetch waits
+   * for the Sheets index to settle (loaded OR confirmed-not-configured)
+   * before firing, and doesn't fire at all if Sheets is configured but
+   * errored — see the blocking notice in the Job Signals tab below.
+   * Refresh-button clicks after that first load aren't re-gated: the
+   * `/api/job-signals` route re-checks Sheets itself on every call anyway.
+   */
+  const [jobSignalsGateCleared, setJobSignalsGateCleared] = useState(false);
+  useEffect(() => {
+    if (jobSignalsGateCleared || sheetsIndexLoading || !sheetsIndexStatus) return;
+    if (sheetsIndexStatus.configured !== false && sheetsIndexStatus.error) return;
+    setJobSignalsGateCleared(true);
+    loadJobSignals();
+  }, [jobSignalsGateCleared, sheetsIndexLoading, sheetsIndexStatus, loadJobSignals]);
+
   useEffect(() => {
     refreshCredits();
+    refreshSheetsIndex();
     fetch("/api/settings")
       .then((r) => r.json())
       .then((d) => {
@@ -404,8 +645,9 @@ export default function Dashboard() {
     return data as T;
   }
 
-  async function handleSearch(org?: Organization) {
-    if (!company.trim()) return;
+  async function handleSearch(org?: Organization, queryOverride?: string) {
+    const query = (queryOverride ?? company).trim();
+    if (!query) return;
     setError(null);
     setSavedTo(null);
     setStage("searching");
@@ -418,12 +660,12 @@ export default function Dashboard() {
       if (!target) {
         const { organizations } = await post<{ organizations: Organization[] }>(
           "/api/company",
-          { query: company },
+          { query },
         );
         setOrgs(organizations);
         if (organizations.length === 0) {
           setError(
-            `No Apollo organization found for "${company}". Try the company's domain instead (e.g. dbs.com).`,
+            `No Apollo organization found for "${query}". Try the company's domain instead (e.g. dbs.com).`,
           );
           setStage("idle");
           return;
@@ -445,7 +687,7 @@ export default function Dashboard() {
         diagnostics?: string[];
         settings: Settings;
       }>("/api/search", {
-        companyName: target.name || company,
+        companyName: target.name || query,
         organizationIds: target.id ? [target.id] : undefined,
         domains: target.domain ? [target.domain, ...target.altDomains] : undefined,
         // Quick filters override saved settings for this search only.
@@ -489,6 +731,38 @@ export default function Dashboard() {
       setError(err instanceof Error ? err.message : "Search failed");
       setStage("idle");
     }
+  }
+
+  async function handleFindManagingCompany() {
+    if (!managerQuery.trim()) return;
+    setManagerLoading(true);
+    setManagerError(null);
+    setManagerResult(null);
+    try {
+      const result = await post<ManagingCompanyResult>("/api/managing-company", {
+        property: managerQuery,
+      });
+      setManagerResult(result);
+    } catch (err) {
+      setManagerError(
+        err instanceof Error ? err.message : "Failed to look up the managing company",
+      );
+    } finally {
+      setManagerLoading(false);
+    }
+  }
+
+  // Hands the looked-up managing company to the company search field above
+  // and searches Apollo immediately — skips the redundant manual "Search"
+  // click, since the name is already resolved.
+  function useManagingCompany(name: string) {
+    setCompany(name);
+    setSelectedOrg(null);
+    setOrgs([]);
+    setManagerOpen(false);
+    setManagerResult(null);
+    setManagerQuery("");
+    handleSearch(undefined, name);
   }
 
   async function handleEnrich() {
@@ -636,10 +910,14 @@ export default function Dashboard() {
           data.rowsPushed
         } row${data.rowsPushed === 1 ? "" : "s"}.`,
       );
-  
+
       if (sheetMode === "create") {
         setNewSheetName("");
       }
+
+      // These rows just changed what's already-sourced — re-warm so the next
+      // company check (this session or the header count) reflects them.
+      refreshSheetsIndex(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Google Sheets export failed");
     } finally {
@@ -650,6 +928,71 @@ export default function Dashboard() {
   function toggleCreate() {
     setCreateOpen((prev) => !prev);
     setCreateError(null);
+  }
+
+  async function toggleLabel() {
+    const next = !labelOpen;
+    setLabelOpen(next);
+    setTagResult(null);
+    setTagAppUrl(null);
+    if (next && apolloLabels.length === 0 && !labelsLoading) {
+      setLabelsLoading(true);
+      setLabelsError(null);
+      try {
+        const res = await fetch("/api/apollo-labels");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Failed to list Apollo lists");
+        const contactLists = (
+          data.labels as { name: string; count: number; modality: string }[]
+        ).filter((l) => l.modality === "contacts");
+        setApolloLabels(contactLists);
+        if (contactLists.length === 0) setLabelMode("new");
+      } catch (err) {
+        setLabelsError(err instanceof Error ? err.message : "Failed to list Apollo lists");
+      } finally {
+        setLabelsLoading(false);
+      }
+    }
+  }
+
+  async function handleTagInApollo() {
+    const labelName =
+      labelMode === "existing" ? selectedLabelName : newLabelName.trim();
+    if (!labelName) return;
+
+    setTagging(true);
+    setTagResult(null);
+    setTagAppUrl(null);
+
+    try {
+      const data = await post<{ created: number; existing: number; appUrl: string | null }>(
+        "/api/apollo-labels",
+        { contacts, labelName },
+      );
+
+      const parts = [];
+      if (data.created > 0) parts.push(`${data.created} new`);
+      if (data.existing > 0) parts.push(`${data.existing} already in Apollo`);
+      setTagResult(
+        `Tagged ${parts.join(", ") || "0 contacts"} with "${labelName}" in Apollo.`,
+      );
+      setTagAppUrl(data.appUrl);
+
+      if (labelMode === "new") {
+        setApolloLabels((prev) =>
+          prev.some((l) => l.name === labelName)
+            ? prev
+            : [...prev, { name: labelName, count: 0 }],
+        );
+        setSelectedLabelName(labelName);
+        setLabelMode("existing");
+        setNewLabelName("");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Tagging in Apollo failed");
+    } finally {
+      setTagging(false);
+    }
   }
 
   async function handleCreateSheet() {
@@ -703,6 +1046,15 @@ export default function Dashboard() {
     setCreateOpen(false);
     setNewSheetTitle("");
     setCreateError(null);
+    setLabelOpen(false);
+    setTagResult(null);
+    setTagAppUrl(null);
+    setLabelsError(null);
+    setManagerOpen(false);
+    setManagerQuery("");
+    setManagerLoading(false);
+    setManagerError(null);
+    setManagerResult(null);
   }
 
   const busy = stage === "searching" || stage === "enriching";
@@ -749,6 +1101,24 @@ export default function Dashboard() {
     setWorkspace("outreach");
   }
 
+  // "New companies only" — narrows Job Signals to listings whose company
+  // isn't collated anywhere in the Voncierge Outreach Google Sheets. Purely
+  // a client-side view filter; the underlying score.isNewLead flag is
+  // already computed server-side against the loaded Sheets index.
+  const visibleJobSignals = useMemo(
+    () => (newLeadsOnly ? jobSignals.filter((s) => s.score.isNewLead === true) : jobSignals),
+    [jobSignals, newLeadsOnly],
+  );
+  const visibleWatchingJobSignals = useMemo(
+    () =>
+      newLeadsOnly ? watchingJobSignals.filter((s) => s.score.isNewLead === true) : watchingJobSignals,
+    [watchingJobSignals, newLeadsOnly],
+  );
+  const sheetsBlockedError =
+    sheetsIndexStatus?.configured !== false && Boolean(sheetsIndexStatus?.error);
+  const waitingOnSheetsForJobSignals =
+    !jobSignalsGateCleared && !sheetsBlockedError;
+
   return (
     <div className="shell">
       <header className="product-hero">
@@ -760,6 +1130,56 @@ export default function Dashboard() {
           />
 
           <div className="header-meta">
+            <a href="/history" className="filter-settings-link">
+              <BarChart size={15} />
+              Run history
+            </a>
+
+            {sheetsIndexStatus?.configured !== false && (
+              <span
+                className="credit-pill"
+                title={
+                  sheetsIndexLoading
+                    ? "Scanning every spreadsheet in the Voncierge Outreach shared drive"
+                    : sheetsIndexStatus?.error
+                      ? sheetsIndexStatus.error
+                      : sheetsIndexStatus?.loadedAt
+                        ? `Loaded ${new Date(sheetsIndexStatus.loadedAt).toLocaleTimeString()} — click to re-scan`
+                        : undefined
+                }
+              >
+                {sheetsIndexLoading ? (
+                  <>
+                    <span className="spinner" />
+                    <span>Loading Voncierge Outreach…</span>
+                  </>
+                ) : sheetsIndexStatus?.error ? (
+                  <>
+                    <AlertTriangle size={13} />
+                    <span>Voncierge Outreach unavailable</span>
+                  </>
+                ) : (
+                  <>
+                    <Check size={13} />
+                    <span>
+                      Voncierge Outreach loaded — {sheetsIndexStatus?.sheetCount ?? 0} sheet
+                      {sheetsIndexStatus?.sheetCount === 1 ? "" : "s"} acquired
+                    </span>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="pill-refresh"
+                  onClick={() => refreshSheetsIndex(true)}
+                  disabled={sheetsIndexLoading}
+                  aria-label="Re-scan the Voncierge Outreach shared drive"
+                  title="Re-scan the Voncierge Outreach shared drive"
+                >
+                  ↻
+                </button>
+              </span>
+            )}
+
             <span
               className="credit-pill"
               title="Lead credits remaining on this Apollo account"
@@ -814,6 +1234,15 @@ export default function Dashboard() {
             <span className="workspace-tab-number">03</span>
             ✦ News Triggers
           </button>
+
+          <button
+            type="button"
+            className={workspace === "jobs" ? "active" : ""}
+            onClick={() => setWorkspace("jobs")}
+          >
+            <span className="workspace-tab-number">04</span>
+            ✦ Job Signals
+          </button>
         </nav>
       </header>
 
@@ -830,7 +1259,28 @@ export default function Dashboard() {
             </p>
           </div>
 
-          <OutreachGenerator initialRequest={outreachPrefill} />
+          <div className="row" style={{ gap: 8, marginBottom: 20 }}>
+            <button
+              type="button"
+              className={outreachChannel === "email" ? "" : "secondary"}
+              onClick={() => setOutreachChannel("email")}
+            >
+              Email Campaigns
+            </button>
+            <button
+              type="button"
+              className={outreachChannel === "linkedin" ? "" : "secondary"}
+              onClick={() => setOutreachChannel("linkedin")}
+            >
+              LinkedIn Drafts
+            </button>
+          </div>
+
+          {outreachChannel === "email" ? (
+            <OutreachGenerator initialRequest={outreachPrefill} />
+          ) : (
+            <LinkedInDraftGenerator />
+          )}
         </div>
       )}
 
@@ -1084,6 +1534,353 @@ export default function Dashboard() {
         </div>
       )}
 
+      {workspace === "jobs" && jobSignalOutreachTarget && (
+        <div className="workspace-view">
+          <JobSignalOutreachView
+            signal={jobSignalOutreachTarget}
+            onBack={() => setJobSignalOutreachTarget(null)}
+          />
+        </div>
+      )}
+
+      {/* Job Signals reuses the news-trigger-* CSS classes rather than a
+          parallel set — visually this is the same "scored signal card in a
+          feed" pattern as News Triggers, just a different source and a
+          deterministic (not AI) score. */}
+      {workspace === "jobs" && !jobSignalOutreachTarget && (
+        <div className="workspace-view news-triggers-workspace">
+          <div className="workspace-intro news-triggers-intro">
+            <div>
+              <span className="workspace-kicker">JOB SIGNALS · SINGAPORE</span>
+              <h2>Find who&apos;s hiring for this, right now.</h2>
+              <p>
+                Live job postings from MyCareersFuture (Singapore&apos;s official job
+                portal) matched against Voncierge&apos;s target departments — including
+                frontline and operational CX roles (concierge, guest relations, front
+                desk). A company hiring for one of those is itself the signal: it&apos;s
+                still running the manpower-dependent service model Voncierge replaces.
+                Free and unauthenticated — refetched on every visit, no manual step
+                needed. Singapore-only: this complements the pipeline&apos;s other
+                markets, it doesn&apos;t cover them.
+              </p>
+            </div>
+
+            <div className="news-trigger-toolbar">
+              {jobSignalCache?.lastRefreshAt && (
+                <span className="small muted">
+                  Refreshed {formatNewsTriggerDate(jobSignalCache.lastRefreshAt)}
+                </span>
+              )}
+
+              {jobSignalsSheetsConfigured !== false && (
+                <label
+                  className="inline-check"
+                  title="Only show listings at companies not collated anywhere in the Voncierge Outreach Google Sheets"
+                >
+                  <input
+                    type="checkbox"
+                    checked={newLeadsOnly}
+                    onChange={(e) => setNewLeadsOnly(e.target.checked)}
+                    disabled={waitingOnSheetsForJobSignals || sheetsBlockedError}
+                  />
+                  New companies only
+                  {typeof jobSignalCounts?.newLeads === "number" && ` (${jobSignalCounts.newLeads})`}
+                </label>
+              )}
+
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => loadJobSignals()}
+                disabled={jobSignalsLoading || waitingOnSheetsForJobSignals || sheetsBlockedError}
+                title="Fetches the latest listings from MyCareersFuture — free, no confirmation needed"
+              >
+                {jobSignalsLoading ? (
+                  <>
+                    <span className="spinner" />
+                    Refreshing…
+                  </>
+                ) : (
+                  "Refresh job signals"
+                )}
+              </button>
+            </div>
+          </div>
+
+          {jobSignalsError && (
+            <div className="notice error">
+              <AlertCircle size={16} />
+              <div>{jobSignalsError}</div>
+            </div>
+          )}
+
+          {sheetsBlockedError ? (
+            <section className="panel news-trigger-loading" aria-live="polite">
+              <div className="news-trigger-loading-copy">
+                <AlertCircle size={16} />
+                Google Sheets failed to load ({sheetsIndexStatus?.error}) — Job Signals stays
+                paused until it does, since &quot;new company&quot; only means something once
+                Sheets has actually loaded.
+              </div>
+              <button type="button" className="secondary" onClick={() => refreshSheetsIndex(true)}>
+                Retry Google Sheets
+              </button>
+            </section>
+          ) : waitingOnSheetsForJobSignals ? (
+            <section className="panel news-trigger-loading" aria-live="polite">
+              <div className="news-trigger-loading-copy">
+                <span className="spinner" />
+                Loading Voncierge Outreach from Google Sheets before fetching job signals…
+              </div>
+            </section>
+          ) : (
+            jobSignalsLoading &&
+            !jobSignalsLoaded && (
+              <section className="panel news-trigger-loading" aria-live="polite">
+                <div className="news-trigger-loading-copy">
+                  <span className="spinner" />
+                  Fetching live listings from MyCareersFuture…
+                </div>
+              </section>
+            )
+          )}
+
+          {jobSignalsLoaded && jobSignalCounts && (
+            <>
+              <div className="news-trigger-summary job-signal-summary">
+                <div className="news-trigger-stat">
+                  <span>Opportunities</span>
+                  <strong>{jobSignalCounts.opportunities}</strong>
+                </div>
+                <div className="news-trigger-stat">
+                  <span>Already in pipeline</span>
+                  <strong>{jobSignalCounts.targetCompanyHits}</strong>
+                </div>
+                {jobSignalsSheetsConfigured !== false && (
+                  <div className="news-trigger-stat">
+                    <span>New companies</span>
+                    <strong>{jobSignalCounts.newLeads}</strong>
+                  </div>
+                )}
+                <div className="news-trigger-stat">
+                  <span>Listings scanned</span>
+                  <strong>{jobSignalCounts.totalListings}</strong>
+                </div>
+                <div className="news-trigger-stat">
+                  <span>Data source</span>
+                  <strong>Live</strong>
+                </div>
+              </div>
+
+              {jobSignalOverview &&
+                (jobSignalOverview.roleBreakdown.length > 0 ||
+                  jobSignalOverview.topCompanies.length > 0) && (
+                  <section className="panel job-signal-overview">
+                    <div className="job-signal-overview-head">
+                      <h3>What companies are hiring for</h3>
+                      <p className="small muted">
+                        {jobSignalOverview.frontlineSignals} of {jobSignalCounts.totalListings}{" "}
+                        listing{jobSignalCounts.totalListings === 1 ? "" : "s"} are frontline or
+                        operational roles — concierge, guest relations, front desk — often the
+                        clearest sign a company needs exactly what Voncierge does.{" "}
+                        {jobSignalOverview.postedThisWeek} posted in the last 7 days.
+                      </p>
+                    </div>
+
+                    <div className="job-signal-overview-grid">
+                      <div className="job-signal-overview-col">
+                        <span className="news-trigger-label">ROLES BEING HIRED FOR</span>
+                        <div className="job-signal-bar-list">
+                          {jobSignalOverview.roleBreakdown.map((row) => {
+                            const max = jobSignalOverview.roleBreakdown[0]?.count || 1;
+                            return (
+                              <div className="job-signal-bar-row" key={row.label}>
+                                <span className="job-signal-bar-label">{row.label}</span>
+                                <div className="job-signal-bar-track">
+                                  <div
+                                    className="job-signal-bar-fill"
+                                    style={{ width: `${Math.max(6, (row.count / max) * 100)}%` }}
+                                  />
+                                </div>
+                                <span className="job-signal-bar-count">{row.count}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="job-signal-overview-col">
+                        <span className="news-trigger-label">TOP HIRING COMPANIES</span>
+                        <div className="job-signal-bar-list">
+                          {jobSignalOverview.topCompanies.map((row) => {
+                            const max = jobSignalOverview.topCompanies[0]?.count || 1;
+                            return (
+                              <div className="job-signal-bar-row" key={row.label}>
+                                <span className="job-signal-bar-label">{row.label}</span>
+                                <div className="job-signal-bar-track">
+                                  <div
+                                    className="job-signal-bar-fill"
+                                    style={{ width: `${Math.max(6, (row.count / max) * 100)}%` }}
+                                  />
+                                </div>
+                                <span className="job-signal-bar-count">{row.count}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                )}
+
+              {visibleJobSignals.length === 0 ? (
+                <section className="panel">
+                  <div className="empty">
+                    <Info size={28} />
+                    <h3>
+                      {newLeadsOnly ? "No new companies right now" : "No strong signals right now"}
+                    </h3>
+                    <p>
+                      {newLeadsOnly
+                        ? "Every opportunity this refresh is already collated somewhere in Google Sheets — turn off “New companies only” to see the full list."
+                        : `${jobSignalCounts.totalListings} listings were scanned, but none crossed the 70-point review threshold this refresh.`}
+                    </p>
+                  </div>
+                </section>
+              ) : (
+                <div className="news-trigger-grid">
+                  {visibleJobSignals.map((signal) => {
+                    const score = signal.score.relevanceScore;
+                    const scoreBand = score >= 85 ? "high" : score >= 70 ? "medium" : "low";
+
+                    return (
+                      <article
+                        className="news-trigger-card"
+                        data-score-band={scoreBand}
+                        key={signal.uuid}
+                      >
+                        <div className="news-trigger-card-top">
+                          <div className="news-trigger-identity">
+                            <div className="news-trigger-company-row">
+                              <span className={`news-score-badge ${scoreBand}`}>{score}</span>
+
+                              <div>
+                                <h3>{signal.company.name}</h3>
+                                <div className="news-trigger-meta">
+                                  <span>{signal.department}</span>
+                                  {signal.positionLevel && <span>{signal.positionLevel}</span>}
+                                  <span>{formatJobSignalDate(signal.postedDate)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                            {signal.isNew && <span className="news-new-pill">✦ New</span>}
+                            {signal.score.isFrontlineSignal && (
+                              <span
+                                className="trigger-action-pill low"
+                                title="A frontline/operational role — a direct signal of the manpower-dependent service gap Voncierge targets"
+                              >
+                                Frontline signal
+                              </span>
+                            )}
+                            {signal.score.isTargetCompany ? (
+                              <span className="trigger-action-pill high">In pipeline</span>
+                            ) : (
+                              signal.score.isNewLead && (
+                                <span
+                                  className="trigger-action-pill medium"
+                                  title="Not collated anywhere in the Voncierge Outreach Google Sheets"
+                                >
+                                  New Lead
+                                </span>
+                              )
+                            )}
+                          </div>
+                        </div>
+
+                        <a
+                          className="news-trigger-headline"
+                          href={signal.jobUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {signal.title}
+                        </a>
+
+                        <div className="news-trigger-analysis">
+                          <div className="news-trigger-analysis-block">
+                            <span className="news-trigger-label">WHY THIS MATTERS</span>
+                            <p>{signal.score.whyRelevant}</p>
+                          </div>
+
+                          <div className="news-trigger-analysis-block">
+                            <span className="news-trigger-label">SUGGESTED ANGLE</span>
+                            <p>{signal.score.suggestedOutreachAngle}</p>
+                          </div>
+                        </div>
+
+                        <div className="news-trigger-actions">
+                          <a
+                            className="news-read-link"
+                            href={signal.jobUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            View listing ↗
+                          </a>
+
+                          <button
+                            type="button"
+                            onClick={() => handleExploreOutreachFromJobSignal(signal)}
+                          >
+                            <Users size={15} />
+                            Explore outreach
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+
+              {visibleWatchingJobSignals.length > 0 && (
+                <div className="ignored-news-section">
+                  <button
+                    type="button"
+                    className="ghost ignored-news-toggle"
+                    onClick={() => setShowWatchingJobSignals((current) => !current)}
+                  >
+                    {showWatchingJobSignals ? "Hide" : "Show"} {visibleWatchingJobSignals.length}{" "}
+                    below-threshold listing{visibleWatchingJobSignals.length === 1 ? "" : "s"}
+                  </button>
+
+                  {showWatchingJobSignals && (
+                    <div className="ignored-news-list">
+                      {visibleWatchingJobSignals.map((signal) => (
+                        <div className="ignored-news-row" key={signal.uuid}>
+                          <span className="ignored-news-score">{signal.score.relevanceScore}</span>
+
+                          <div className="ignored-news-copy">
+                            <a href={signal.jobUrl} target="_blank" rel="noopener noreferrer">
+                              {signal.title}
+                            </a>
+                            <p>{signal.score.whyRelevant}</p>
+                          </div>
+
+                          <span className="small muted">{signal.company.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {workspace === "leads" && (
         <div className="workspace-view">
       {!hasKey && (
@@ -1161,6 +1958,59 @@ export default function Dashboard() {
             rather than in a separate boxed-off panel. */}
         {!searchOpen && selectedOrg && (
           <div className="overview">
+            {selectedOrg.domain && (
+              <div className="overview-block">
+                <div className="overview-label small muted">Company profile</div>
+                {orgProfileLoading ? (
+                  <p className="small muted">Loading company profile…</p>
+                ) : orgProfileError ? (
+                  <p className="small muted">
+                    Couldn&apos;t load company profile ({orgProfileError}).
+                  </p>
+                ) : !orgProfile ? (
+                  <button type="button" className="ghost" onClick={loadOrgProfile}>
+                    <Building size={14} />
+                    Load company profile · 1 credit
+                  </button>
+                ) : (
+                  <>
+                    <p className="small">
+                      {[
+                        orgProfile.industry,
+                        orgProfile.employeeCount
+                          ? `${orgProfile.employeeCount.toLocaleString()} employees`
+                          : null,
+                        [orgProfile.city, orgProfile.country].filter(Boolean).join(", ") ||
+                          null,
+                        orgProfile.foundedYear ? `founded ${orgProfile.foundedYear}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || "No firmographic detail on record for this domain."}
+                    </p>
+                    {orgProfile.shortDescription && (
+                      <p className="small muted">{orgProfile.shortDescription}</p>
+                    )}
+                    {orgProfile.publiclyTraded ? (
+                      <p className="small muted">
+                        Publicly traded
+                        {orgProfile.stockSymbol ? ` (${orgProfile.stockSymbol})` : ""}
+                      </p>
+                    ) : orgProfile.latestFundingStage ? (
+                      <p className="small muted">
+                        Latest funding: {orgProfile.latestFundingStage}
+                        {orgProfile.latestFundingDate
+                          ? ` (${new Date(orgProfile.latestFundingDate).toLocaleDateString()})`
+                          : ""}
+                        {orgProfile.totalFundingPrinted
+                          ? ` · ${orgProfile.totalFundingPrinted} raised to date`
+                          : ""}
+                      </p>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            )}
+
             {(existingLoading || existingContacts || existingError) && (
               <div className="overview-block">
                 {existingLoading ? (
@@ -1308,6 +2158,110 @@ export default function Dashboard() {
             </button>
           )}
         </div>
+
+        {/* The brand on a property (a mall, hotel, or building) is often not
+            who makes vendor/tech decisions — that's frequently outsourced to
+            a facilities management or real estate company. This looks that
+            company up via OpenAI and hands it to the search field above. */}
+        <div className="overview-block" style={{ marginTop: 4, marginBottom: 16 }}>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setManagerOpen((v) => !v)}
+            aria-expanded={managerOpen}
+          >
+            <Sparkle size={14} />
+            Not sure who manages this property? Find the managing company
+          </button>
+
+          {managerOpen && (
+            <div style={{ marginTop: 10 }}>
+              <p className="small muted">
+                Some properties — malls, hotels, office towers — are run by a
+                separate facilities or real estate management company rather
+                than the brand itself. Describe the property and Voncierge
+                will look up who actually manages it.
+              </p>
+              <div className="row">
+                <div className="grow">
+                  <input
+                    type="text"
+                    placeholder="Property or building name — e.g. Raffles City Singapore"
+                    value={managerQuery}
+                    onChange={(e) => setManagerQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !managerLoading) handleFindManagingCompany();
+                    }}
+                    disabled={managerLoading}
+                  />
+                </div>
+                <button
+                  onClick={handleFindManagingCompany}
+                  disabled={managerLoading || !managerQuery.trim()}
+                >
+                  {managerLoading ? (
+                    <>
+                      <span className="spinner" />
+                      Searching…
+                    </>
+                  ) : (
+                    <>
+                      <Search size={15} />
+                      Find managing company
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {managerError && (
+                <p className="small muted" style={{ marginTop: 8 }}>
+                  {managerError}
+                </p>
+              )}
+
+              {managerResult && (
+                managerResult.found && managerResult.managingCompany ? (
+                  <div className="notice info wide" style={{ marginTop: 10 }}>
+                    <Building size={16} />
+                    <div style={{ width: "100%" }}>
+                      <strong>{managerResult.managingCompany}</strong>{" "}
+                      <span className="small muted">
+                        ({managerResult.confidence} confidence
+                        {managerResult.managingCompanyType
+                          ? ` · ${managerResult.managingCompanyType.replace(/_/g, " ")}`
+                          : ""}
+                        )
+                      </span>
+                      <p className="small" style={{ marginTop: 4 }}>
+                        {managerResult.reasoning}
+                      </p>
+                      {managerResult.alternateCandidates.length > 0 && (
+                        <p className="small muted">
+                          Other possibilities: {managerResult.alternateCandidates.join(", ")}
+                        </p>
+                      )}
+                      <div style={{ marginTop: 8 }}>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => useManagingCompany(managerResult.managingCompany!)}
+                        >
+                          Use this company
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="small muted" style={{ marginTop: 10 }}>
+                    {managerResult.reasoning ||
+                      "Couldn't confidently identify a managing company for this property."}
+                  </p>
+                )
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Quick filters — the settings people change run-to-run. */}
         <div className="quickbar">
           <div className="field">
@@ -1770,7 +2724,15 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="row" style={{ marginBottom: 16 }}>
+          <div
+            className="row"
+            style={{
+              marginBottom: 16,
+              flexWrap: "nowrap",
+              overflowX: "auto",
+              paddingBottom: 4,
+            }}
+          >
             <button onClick={handleDownload} disabled={contacts.length === 0}>
               <Download size={15} />
               Download {csvName}
@@ -1800,6 +2762,15 @@ export default function Dashboard() {
             >
               <Plus size={15} />
               Create New Sheet
+            </button>
+            <button
+              className="secondary"
+              onClick={toggleLabel}
+              disabled={contacts.length === 0}
+              aria-expanded={labelOpen}
+            >
+              <Tag size={15} />
+              Tag in Apollo
             </button>
           </div>
 
@@ -1929,6 +2900,115 @@ export default function Dashboard() {
                   folder.
                 </div>
               )}
+            </div>
+          )}
+
+          {labelOpen && (
+            <div style={{ marginBottom: 16 }}>
+              <div
+                className="row"
+                style={{
+                  marginBottom: 12,
+                  alignItems: "flex-end",
+                }}
+              >
+                <div className="field">
+                  <label htmlFor="label-mode">List</label>
+
+                  <select
+                    id="label-mode"
+                    value={labelMode}
+                    onChange={(e) => setLabelMode(e.target.value as "existing" | "new")}
+                    disabled={tagging}
+                  >
+                    <option value="new">New Apollo list</option>
+                    <option value="existing">Existing Apollo list</option>
+                  </select>
+                </div>
+
+                {labelMode === "existing" ? (
+                  <div className="field">
+                    <label htmlFor="existing-label">Apollo list</label>
+
+                    {labelsLoading ? (
+                      <div className="small muted">Loading lists…</div>
+                    ) : labelsError ? (
+                      <div className="small" style={{ color: "var(--bad)" }}>
+                        {labelsError}
+                      </div>
+                    ) : apolloLabels.length === 0 ? (
+                      <div className="small muted">
+                        No existing contact lists found. Create a new one instead.
+                      </div>
+                    ) : (
+                      <select
+                        id="existing-label"
+                        value={selectedLabelName}
+                        onChange={(e) => setSelectedLabelName(e.target.value)}
+                        disabled={tagging}
+                      >
+                        <option value="">Choose a list…</option>
+                        {apolloLabels.map((label) => (
+                          <option key={label.name} value={label.name}>
+                            {label.name} ({label.count})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                ) : (
+                  <div className="field">
+                    <label htmlFor="new-label-name">New list name</label>
+
+                    <input
+                      id="new-label-name"
+                      type="text"
+                      value={newLabelName}
+                      onChange={(e) => setNewLabelName(e.target.value)}
+                      placeholder={
+                        selectedOrg?.name ? `${selectedOrg.name} — Voncierge` : "Voncierge Leads"
+                      }
+                      disabled={tagging}
+                    />
+                  </div>
+                )}
+
+                <button
+                  onClick={handleTagInApollo}
+                  disabled={
+                    tagging ||
+                    contacts.length === 0 ||
+                    (labelMode === "existing" && !selectedLabelName) ||
+                    (labelMode === "new" && !newLabelName.trim())
+                  }
+                >
+                  <Tag size={15} />
+                  {tagging ? "Tagging…" : "Tag"}
+                </button>
+              </div>
+
+              <div className="small muted">
+                Creates each contact in Apollo's team CRM if it doesn't already exist
+                (matched by email), then adds it to the list. Visible to everyone on the
+                Apollo account. Costs 0 credits.
+              </div>
+            </div>
+          )}
+
+          {tagResult && (
+            <div className="notice info">
+              <Check size={16} />
+              <div>
+                {tagResult}
+                {tagAppUrl && (
+                  <>
+                    {" "}
+                    <a href={tagAppUrl} target="_blank" rel="noreferrer">
+                      Open in Apollo
+                    </a>
+                  </>
+                )}
+              </div>
             </div>
           )}
 

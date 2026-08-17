@@ -10,7 +10,7 @@
  *   - people/bulk_match    -> COSTS credits, max 10 people per call
  */
 
-import type { Candidate, Organization } from "./types";
+import type { Candidate, Organization, OrganizationProfile } from "./types";
 
 const BASE = "https://api.apollo.io/api/v1";
 
@@ -160,6 +160,8 @@ async function requestWithRaw<T>(
 
 type RawOrg = {
   id?: string;
+  /** Only present on `mixed_companies/search` results in the `accounts` bucket — the real Apollo org ID, distinct from `id` (an account ID). */
+  organization_id?: string;
   name?: string;
   primary_domain?: string;
   website_url?: string;
@@ -178,13 +180,22 @@ function normaliseDomain(input?: string | null): string | null {
     .replace(/\/.*$/, "") || null;
 }
 
-function toOrganization(raw: RawOrg): Organization {
+/**
+ * `idField` selects which raw field is the real Apollo organization ID.
+ * `mixed_companies/search` returns two buckets with different ID semantics:
+ * `organizations` entries use `id` directly, but `accounts` entries (companies
+ * already saved to this Apollo team) use `id` for an *account* ID — the real
+ * org ID lives in `organization_id`. Passing the wrong one resolves the
+ * company "successfully" but makes every downstream people-search silently
+ * match nothing, since Apollo's organization_ids filter only accepts org IDs.
+ */
+function toOrganization(raw: RawOrg, idField: "id" | "organization_id" = "id"): Organization {
   const domains = [raw.primary_domain, raw.domain, raw.website_url]
     .map(normaliseDomain)
     .filter((d): d is string => Boolean(d));
   const unique = [...new Set(domains)];
   return {
-    id: raw.id ?? "",
+    id: (idField === "organization_id" ? raw.organization_id : raw.id) ?? raw.id ?? "",
     name: raw.name ?? "",
     domain: unique[0] ?? null,
     altDomains: unique.slice(1),
@@ -199,7 +210,11 @@ function toOrganization(raw: RawOrg): Organization {
  * group structures like "Sunway" span multiple domains (corporate vs mall unit).
  */
 export async function searchOrganizations(query: string): Promise<Organization[]> {
-  const looksLikeDomain = /\./.test(query) && !/\s/.test(query);
+  // Requires the whole trimmed input to be domain-shaped (label.label...tld),
+  // not just "contains a period" — a name like "Grab.com Holdings" or an
+  // abbreviation with a stray dot must not get routed to the domain-only path.
+  const looksLikeDomain =
+    /^(https?:\/\/)?(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(\/\S*)?$/i.test(query.trim());
 
   if (looksLikeDomain) {
     const domain = normaliseDomain(query);
@@ -207,7 +222,12 @@ export async function searchOrganizations(query: string): Promise<Organization[]
       `/organizations/enrich?domain=${encodeURIComponent(domain ?? query)}`,
       { method: "GET" },
     );
-    return data.organization ? [toOrganization(data.organization)] : [];
+    if (data.organization) {
+      return [toOrganization(data.organization)];
+    }
+    // No exact domain match — the query may have been misclassified (or is a
+    // domain Apollo just doesn't have), so fall through to the name search
+    // below instead of returning empty.
   }
 
   const data = await request<{ organizations?: RawOrg[]; accounts?: RawOrg[] }>(
@@ -218,7 +238,10 @@ export async function searchOrganizations(query: string): Promise<Organization[]
     },
   );
 
-  const orgs = [...(data.organizations ?? []), ...(data.accounts ?? [])];
+  const orgs = [
+    ...(data.organizations ?? []).map((o) => toOrganization(o, "id")),
+    ...(data.accounts ?? []).map((a) => toOrganization(a, "organization_id")),
+  ];
 
   // Apollo returns many records for one company ("Maybank" returns 10, mostly
   // subsidiaries). Rank the likeliest parent entity first.
@@ -230,7 +253,6 @@ export async function searchOrganizations(query: string): Promise<Organization[]
   // more likely the parent — "Maybank" over "Maybank Investment Banking Group".
   const q = query.trim().toLowerCase();
   return orgs
-    .map(toOrganization)
     .filter((o) => o.id)
     .sort((a, b) => {
       const an = a.name.toLowerCase();
@@ -253,6 +275,79 @@ export async function searchOrganizations(query: string): Promise<Organization[]
 
       return a.name.length - b.name.length;
     });
+}
+
+/**
+ * Fields `organizations/enrich` returns beyond what `toOrganization` above
+ * pulls out — industry, HQ, funding. `mixed_companies/search` (the name-search
+ * path) never carries these, so this is the only source for them.
+ */
+type RawOrgProfile = RawOrg & {
+  industry?: string;
+  founded_year?: number;
+  short_description?: string;
+  city?: string;
+  state?: string;
+  country?: string;
+  phone?: string;
+  keywords?: string[];
+  total_funding_printed?: string;
+  latest_funding_stage?: string;
+  latest_funding_round_date?: string;
+  publicly_traded_symbol?: string | null;
+};
+
+/**
+ * Fetch firmographic detail (industry, size, HQ, funding stage) for one
+ * resolved organization, to orient the user before they spend a search on it.
+ *
+ * Requires a domain — Apollo's org-enrich endpoint takes `domain`, not an
+ * `id`, which is why this is called only after the user has picked a specific
+ * organization (its domain is known by then), not for every raw search match.
+ *
+ * COSTS 1 CREDIT PER CALL — verified live (2026-08-13): three calls in a row
+ * dropped the account's lead-credit balance by exactly 1 each time. This is
+ * true even though `searchOrganizations`'s existing domain-lookup path also
+ * calls this same endpoint during Step 1 (free) company search — that call
+ * happens to be free in practice only because it's the rarer path (most
+ * lookups go through the by-name `mixed_companies/search`, which is free).
+ * Callers of THIS function must treat it like `people/bulk_match`: never call
+ * it without an explicit user action. See the "Company profile" button in
+ * app/page.tsx — deliberately not automatic on company selection, matching
+ * the credit-gate rule in AGENTS.md.
+ */
+export async function enrichOrganization(domain: string): Promise<OrganizationProfile | null> {
+  const normalised = normaliseDomain(domain);
+  if (!normalised) return null;
+
+  const data = await request<{ organization?: RawOrgProfile }>(
+    `/organizations/enrich?domain=${encodeURIComponent(normalised)}`,
+    { method: "GET" },
+  );
+  const raw = data.organization;
+  if (!raw) return null;
+
+  return {
+    id: raw.id ?? "",
+    name: raw.name ?? "",
+    domain: normaliseDomain(raw.primary_domain ?? raw.domain ?? normalised),
+    websiteUrl: raw.website_url ?? null,
+    linkedinUrl: raw.linkedin_url ?? null,
+    industry: raw.industry ?? null,
+    employeeCount: raw.estimated_num_employees ?? null,
+    foundedYear: raw.founded_year ?? null,
+    shortDescription: raw.short_description ?? null,
+    city: raw.city ?? null,
+    state: raw.state ?? null,
+    country: raw.country ?? null,
+    phone: raw.phone ?? null,
+    keywords: Array.isArray(raw.keywords) ? raw.keywords.slice(0, 8) : [],
+    totalFundingPrinted: raw.total_funding_printed ?? null,
+    latestFundingStage: raw.latest_funding_stage ?? null,
+    latestFundingDate: raw.latest_funding_round_date ?? null,
+    publiclyTraded: Boolean(raw.publicly_traded_symbol),
+    stockSymbol: raw.publicly_traded_symbol ?? null,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -617,4 +712,106 @@ export async function getCreditUsage(): Promise<CreditSnapshot | null> {
 export async function getCreditsRemaining(): Promise<number | null> {
   const snapshot = await getCreditUsage();
   return snapshot?.leadCreditsLeft ?? null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Labels (Apollo's team-shared "Lists") — 0 credits                   */
+/* ------------------------------------------------------------------ */
+
+type RawLabel = {
+  id?: string;
+  name?: string;
+  modality?: string;
+  cached_count?: number;
+};
+
+export type ApolloLabel = {
+  id: string;
+  name: string;
+  modality: "contacts" | "accounts";
+  count: number;
+  /** Canonical deep link into the Apollo web app, per Apollo's own docs. */
+  appUrl: string;
+};
+
+function toLabel(raw: RawLabel): ApolloLabel {
+  const id = raw.id ?? "";
+  return {
+    id,
+    name: raw.name ?? "",
+    modality: raw.modality === "accounts" ? "accounts" : "contacts",
+    count: raw.cached_count ?? 0,
+    appUrl: id ? `https://app.apollo.io/#/lists/${id}` : "",
+  };
+}
+
+/** Every list ("label") visible to the team, contacts and accounts alike. Free. */
+export async function listLabels(): Promise<ApolloLabel[]> {
+  const data = await request<RawLabel[]>("/labels", { method: "GET" });
+  return Array.isArray(data) ? data.map(toLabel) : [];
+}
+
+export type LabelContactInput = {
+  firstName: string;
+  lastName: string;
+  email?: string | null;
+  title?: string | null;
+  organizationName: string;
+  linkedinUrl?: string | null;
+};
+
+/**
+ * Create-or-dedupe up to 100 contacts in Apollo's team CRM and tag them with
+ * one or more lists, in the same call, via `append_label_names`.
+ *
+ * This is the only way to label a person. Apollo's label endpoints
+ * (`/labels/add_entity_ids_to_label_names`) take `entity_ids` that must
+ * already be Contact/Account records saved to the team — never the
+ * `apolloPersonId` this app already carries from `mixed_people/api_search` or
+ * `people/bulk_match`, which lives in Apollo's separate prospect database.
+ * Verified against Apollo's own API docs (2026-08-15): "Search for Contacts"
+ * explicitly "only returns contacts in the search results... To search for
+ * people in the Apollo database, call the People API Search endpoint" —
+ * confirming Contacts and searched People are different record types.
+ * `/contacts/bulk_create` is what bridges the two: it saves a Contact (or, with
+ * `run_dedupe: true`, finds the existing one by email/name+company) and can
+ * apply labels in the same request, so no separate add-to-label call is
+ * needed for the common path.
+ *
+ * FREE — labeling costs 0 credits per Apollo's docs, unlike enrichOrganization
+ * and bulkMatch above. Still gated behind an explicit user action rather than
+ * running automatically: it writes into the team's shared Apollo CRM, visible
+ * to everyone on the account, same reasoning as "Push to Sheet".
+ */
+export async function tagContactsInApollo(
+  contacts: LabelContactInput[],
+  labelNames: string[],
+): Promise<{ created: number; existing: number }> {
+  let created = 0;
+  let existing = 0;
+
+  for (const batch of chunk(contacts, 100)) {
+    const body = {
+      contacts: batch.map((c) => ({
+        first_name: c.firstName,
+        last_name: c.lastName,
+        email: c.email || undefined,
+        title: c.title || undefined,
+        organization_name: c.organizationName,
+        linkedin_url: c.linkedinUrl || undefined,
+      })),
+      append_label_names: labelNames,
+      run_dedupe: true,
+    };
+
+    const data = await request<{
+      created_contacts?: unknown[];
+      existing_contacts?: unknown[];
+    }>("/contacts/bulk_create", { method: "POST", body });
+
+    created += data.created_contacts?.length ?? 0;
+    existing += data.existing_contacts?.length ?? 0;
+  }
+
+  return { created, existing };
 }

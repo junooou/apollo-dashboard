@@ -19,6 +19,11 @@ plain-language map of the folder structure, styling, and wording conventions, an
 and `CODEBASE_GUIDE.md` are living documents — update them whenever you ship a
 feature that changes what's described in them.
 
+**This app is moving to AWS for team-wide use.** Everything below still
+describes today's local, single-user setup. See
+**[`AWS_DEPLOYMENT_NOTES.md`](./AWS_DEPLOYMENT_NOTES.md)** for the running
+list of what has to change before/during that move.
+
 ## Setup
 
 You need **Node 20+** and an **Apollo API key**. Google Sheets/Docs export and
@@ -56,6 +61,20 @@ unaffected.
 A service account, not a personal API key — see `GOOGLE_SHEETS_SETUP.md` for
 the full walkthrough, and `npm run check-drive` to verify it once configured.
 
+If `GOOGLE_PARENT_FOLDER_ID` is set, the moment you first load the app it
+scans every spreadsheet reachable from that shared Drive folder — including
+subfolders — and caches every contact row in memory — the **"Loading
+Voncierge Outreach…"** pill in the header is that scan running. It only
+happens once per server run (a ↻ button on the pill forces a re-scan, and
+pushing new contacts triggers one automatically); every "already sourced"
+check afterwards reads the cache instead of re-scanning Google Sheets from
+scratch, which is what makes the company overview panel (below) fast. Note
+this only ever reflects **Google Sheets** in that folder — contacts that
+only exist as a local CSV (e.g. sourced before "Push to Sheet" was ever used
+for that company) won't show up here. A separate, always-on check compares
+against the local CSVs in `../Apollo Lead Generation/` regardless of whether
+Sheets export is configured at all.
+
 ## How a run works
 
 The app has two tabs: **Lead Sourcing** (below) and **Outreach Studio** (see
@@ -76,6 +95,13 @@ Apollo masks surnames at this stage ("Ga***i") and withholds location and
 LinkedIn until you pay. That is Apollo's behaviour, not a limitation of this
 app — the full details arrive at enrichment. Short surnames like "Lim" just
 look intact because there is nothing to mask.
+
+Once a company is picked, an optional **"Load company profile"** button
+appears — industry, headcount, HQ, founding year, and funding stage, pulled
+from Apollo's organization data. It's a button, not automatic, because unlike
+search this call **costs 1 Apollo credit** — it's there to help you sanity-check
+you've picked the right entity (or size up a company) before spending a real
+search on it, not something that fires on every click.
 
 **2. Review — the credit gate.** Every candidate appears with a score and the
 rule that matched, so you can see *why* someone was kept or dropped. Nothing has
@@ -107,6 +133,12 @@ Apollo's third-party sources, capped (default 10 per company).
 
 Then: summary with credits used, success/failure counts, an itemised issues log,
 CSV download, and a ready-to-paste run-log row for `context.md`.
+
+Every completed run is also logged automatically to **Run History**
+(`/history`, linked from the header) — company, date, contacts sourced,
+credits used, and who ran it. This is a supplement to the `context.md`
+run-log row above, not a replacement for it; see [Run History](#run-history)
+below.
 
 ## Filters
 
@@ -178,6 +210,35 @@ shorter") without starting over, and **save the result as a Google Doc**
 (`GOOGLE_PARENT_FOLDER_ID`) — so it needs the Google service account set up too
 if you want that step, not just the OpenAI key.
 
+## Job Signals
+
+A fourth workspace tab, "✦ Job Signals" — live hiring-signal listings from
+**MyCareersFuture**, Singapore's official government job portal. No API key
+and no setup: it's a genuinely public, unauthenticated endpoint, which is
+also why this tab behaves differently from News Triggers — it fetches fresh
+data on every page load and every browser refresh, rather than waiting for a
+manual "refresh" click. There's nothing to spend, so there's no reason to
+gate it.
+
+Each listing is matched against the same department taxonomy used for Apollo
+person search (Customer Experience, Digital Transformation, Consumer/Retail
+Banking, etc.), scored 0–100 without any AI call — the score comes from
+seniority, how recently the role was posted, and (the strongest signal) 30
+extra points if the hiring company already has contacts sourced in
+`../Apollo Lead Generation/`. Recruitment/staffing agencies (identified by
+Singapore's official SSIC industry code for that category) are filtered out
+before scoring, so a posting is never misattributed to a headhunter instead
+of their undisclosed client.
+
+Click "Generate outreach" on any card to pre-fill the Outreach Studio with
+the specific role, company, and reasoning as the timely angle for a first
+touch — same pattern as generating outreach from a News Trigger.
+
+**Coverage is Singapore-only.** A handful of companies already in
+`Apollo Lead Generation/` are based in Malaysia, Thailand, or Indonesia and
+will never show up here — this complements the pipeline's Singapore reach,
+it doesn't replace the rest.
+
 ## Colour
 
 Colour is bound to function, not decoration. Each workflow step owns a hue that
@@ -208,6 +269,39 @@ firstname,lastname,title,company,seniority,email,email_status,linkedin_url,locat
 "Download CSV" saves through the browser. "Save to Apollo Lead Generation folder"
 writes straight into `../Apollo Lead Generation/` — possible because this runs
 locally. Set `OUTPUT_DIR` in `.env.local` to point somewhere else.
+
+## Tag in Apollo
+
+A fourth result-screen action, alongside Download/Save/Push to Sheet: adds the
+just-sourced contacts to a named Apollo list (Apollo's UI calls these
+**Labels**) — pick an existing list or name a new one. This is what lets the
+team filter Apollo's own CRM to exactly what this app sourced, without a
+second data store to keep in sync.
+
+It costs **0 credits** — unlike search or enrichment, listing and tagging
+contacts is free on every Apollo plan. Under the hood it creates (or, if a
+matching email already exists, finds) each person as a real Apollo Contact and
+applies the list in the same call — a step this app has to do itself, since
+Apollo's list API only accepts existing Contact records, not the raw
+prospect-search results this app sources from. It's still a manual button
+rather than automatic, because unlike a local CSV or a private Google Sheet,
+an Apollo list is visible to your whole team the moment it's created.
+
+## Run History
+
+`/history` lists every enrichment run completed on this machine — date,
+company, contacts landed, contacts dropped, credits used, waterfall recovery
+rate, and who ran it — plus running totals across all of them. It's written
+automatically by `app/api/enrich/route.ts` the moment a run finishes, via
+`lib/history.ts`, to `data/runs.json` (gitignored, same as
+`data/settings.json`).
+
+This is **local to each install**, same as everything else under `data/` —
+if you and a colleague each run your own copy of the app, you each see only
+your own history. It's meant to replace the manual step of copying a
+run-summary line into `context.md`, not to be a shared team dashboard (that
+needs the AWS deployment described in `AWS_DEPLOYMENT_NOTES.md`, which moves
+this to a real shared datastore).
 
 ## Tests
 

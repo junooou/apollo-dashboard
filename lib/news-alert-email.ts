@@ -3,7 +3,23 @@ import { Resend } from "resend";
 import type { NewsTriggerArticle } from "@/lib/currents";
 import type { ScoredNewsTrigger } from "@/lib/news-scoring";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+/**
+ * Lazy singleton, not a module-scope `new Resend(...)`. The Resend SDK
+ * throws immediately if its key is empty, and RESEND_API_KEY is an optional
+ * integration (see .env.local.example) — constructing it at import time
+ * broke `npm run build` for anyone without that key set, since Next
+ * evaluates every API route module while collecting page data. Matches the
+ * lazy-client pattern already used for Apollo (`getApiKey()` in
+ * lib/apollo.ts) and Google Sheets (`getClient()` in lib/sheets.ts).
+ */
+let cachedResend: Resend | null = null;
+
+function getResendClient(): Resend {
+  if (!cachedResend) {
+    cachedResend = new Resend(process.env.RESEND_API_KEY);
+  }
+  return cachedResend;
+}
 
 type AlertArticle = NewsTriggerArticle & {
   score: ScoredNewsTrigger;
@@ -462,7 +478,7 @@ export async function sendNewsTriggerAlert(
     </html>
   `;
 
-  const { data, error } = await resend.emails.send({
+  const { data, error } = await getResendClient().emails.send({
     from,
     to: [to],
     subject,

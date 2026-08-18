@@ -17,7 +17,8 @@
     "openai": "^6.49.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "resend": "^6.19.0"
+    "resend": "^6.19.0",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

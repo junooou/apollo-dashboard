@@ -8,6 +8,7 @@ import {
   listSpreadsheetsInFolder,
   markLinkedinContactSent,
   readRange,
+  resolveOutreachSheetsFolderId,
   updateRange,
 } from "@/lib/sheets";
 import { contactsToRows } from "@/lib/csv";
@@ -148,12 +149,13 @@ export async function POST(req: Request) {
         );
       }
     
+      const outreachSheetsFolderId = await resolveOutreachSheetsFolderId(parentFolderId);
       const result = await createSpreadsheet(
         title,
         body.sheetTitles,
         {
           shareWithEmail: body.shareWithEmail,
-          parentFolderId,
+          parentFolderId: outreachSheetsFolderId,
         },
       );
 

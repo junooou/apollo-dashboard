@@ -653,6 +653,9 @@ export default function Dashboard() {
     setStage("searching");
     setContacts([]);
     setSummary(null);
+    // A new company's contacts should never land in whatever sheet/list the
+    // previous company last pushed/tagged to.
+    resetExportTargets();
 
     try {
       // Resolve the company first unless the user already picked an org.
@@ -835,6 +838,13 @@ export default function Dashboard() {
     setPushOpen(next);
     setPushResult(null);
     setCreatedSheetUrl(null);
+    // The list itself doesn't change per company, so an already-warm list is
+    // reused — but `selectedSheetId` is cleared on every new search (see
+    // `resetExportTargets`), so it needs re-defaulting here too, or the
+    // dropdown would show a sheet whose id no state variable points at.
+    if (next && sheets.length > 0 && !selectedSheetId) {
+      setSelectedSheetId(sheets[0].id);
+    }
     if (next && sheets.length === 0 && !sheetsLoading) {
       setSheetsLoading(true);
       setSheetsError(null);
@@ -1027,6 +1037,34 @@ export default function Dashboard() {
     });
   }
 
+  // Stage-3 export panels (Push to Sheet / Create New Sheet / Tag in Apollo)
+  // all remember which destination (sheet, list) was last used, so the next
+  // company's contacts don't silently land in the previous company's
+  // destination. Shared by `reset()` and every new `handleSearch()` call —
+  // the latter matters because searching a new company doesn't always go
+  // through the explicit "New search" button.
+  function resetExportTargets() {
+    setPushOpen(false);
+    setPushResult(null);
+    setSheetsError(null);
+    setSheetMode("existing");
+    setSelectedSheetId("");
+    setNewSheetName("");
+    setCreatedSheetUrl(null);
+
+    setCreateOpen(false);
+    setNewSheetTitle("");
+    setCreateError(null);
+
+    setLabelOpen(false);
+    setTagResult(null);
+    setTagAppUrl(null);
+    setLabelsError(null);
+    setLabelMode("new");
+    setSelectedLabelName("");
+    setNewLabelName("");
+  }
+
   function reset() {
     setStage("idle");
     setCandidates([]);
@@ -1040,16 +1078,7 @@ export default function Dashboard() {
     setError(null);
     setDiagnostics([]);
     setSearchOpen(true);
-    setPushOpen(false);
-    setPushResult(null);
-    setSheetsError(null);
-    setCreateOpen(false);
-    setNewSheetTitle("");
-    setCreateError(null);
-    setLabelOpen(false);
-    setTagResult(null);
-    setTagAppUrl(null);
-    setLabelsError(null);
+    resetExportTargets();
     setManagerOpen(false);
     setManagerQuery("");
     setManagerLoading(false);
@@ -2775,7 +2804,7 @@ export default function Dashboard() {
           </div>
 
           {createOpen && (
-            <div className="row" style={{ marginBottom: 16, alignItems: "flex-end" }}>
+            <div className="row action-row" style={{ marginBottom: 16, alignItems: "flex-end" }}>
               <div className="field">
                 <label htmlFor="new-sheet-title">Sheet name</label>
                 <input
@@ -2802,7 +2831,7 @@ export default function Dashboard() {
           {pushOpen && (
             <div style={{ marginBottom: 16 }}>
               <div
-                className="row"
+                className="row action-row"
                 style={{
                   marginBottom: 12,
                   alignItems: "flex-end",
@@ -2906,7 +2935,7 @@ export default function Dashboard() {
           {labelOpen && (
             <div style={{ marginBottom: 16 }}>
               <div
-                className="row"
+                className="row action-row"
                 style={{
                   marginBottom: 12,
                   alignItems: "flex-end",

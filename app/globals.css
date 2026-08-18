@@ -922,6 +922,17 @@ ul.issues li {
 
 /* Filter bars ----------------------------------------------------------- */
 
+/*
+ * Rows that pair a .field (label + input) with a trailing action button —
+ * Push to Sheet / Create New Sheet / Tag in Apollo. `.field`'s own
+ * margin-bottom is meant for stacked vertical forms; inside a flex row with
+ * align-items: flex-end it pushes the button down by that same 18px, since
+ * flex-end aligns each item's outer (margin) box, not its border box.
+ */
+.action-row .field {
+  margin-bottom: 0;
+}
+
 .quickbar {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

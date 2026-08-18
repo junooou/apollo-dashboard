@@ -602,11 +602,65 @@ export async function getOrCreateJobSignalOutreachSheet(parentFolderId: string):
     return found.id;
   }
 
+  const outreachSheetsFolderId = await resolveOutreachSheetsFolderId(parentFolderId);
   const { spreadsheetId } = await createSpreadsheet(JOB_SIGNAL_OUTREACH_SHEET_NAME, ["Sheet1"], {
-    parentFolderId,
+    parentFolderId: outreachSheetsFolderId,
   });
   cachedJobSignalOutreachSheetId = spreadsheetId;
   return spreadsheetId;
+}
+
+/** Name of the subfolder inside `GOOGLE_PARENT_FOLDER_ID` ("Voncierge
+ *  Outreach") where every generated contact sheet actually lives — verified
+ *  live (2026-08-13, see `MAX_FOLDER_DEPTH` above). New sheets must be
+ *  created here, not at the shared drive's root, or they'd sit alongside
+ *  real sheets instead of inside the folder people actually browse. */
+export const OUTREACH_SHEETS_SUBFOLDER_NAME = "Outreach Sheets";
+
+/** Cached per-process once resolved, same lifetime rule as `sheetGidCache`. */
+let cachedOutreachSheetsFolderId: string | null = null;
+
+/**
+ * Resolves the "Outreach Sheets" subfolder ID directly inside `parentFolderId`,
+ * creating it if it doesn't exist yet. New spreadsheets are created here
+ * instead of at `parentFolderId`'s own root so they land next to every other
+ * sourced-contact sheet (see `OUTREACH_SHEETS_SUBFOLDER_NAME`).
+ */
+export async function resolveOutreachSheetsFolderId(parentFolderId: string): Promise<string> {
+  if (cachedOutreachSheetsFolderId) return cachedOutreachSheetsFolderId;
+
+  const drive = getDriveReadClient();
+  const res = await drive.files.list({
+    q: `'${parentFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and name = '${OUTREACH_SHEETS_SUBFOLDER_NAME}' and trashed = false`,
+    fields: "files(id)",
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "allDrives",
+  });
+  const existing = res.data.files?.[0]?.id;
+  if (existing) {
+    cachedOutreachSheetsFolderId = existing;
+    return existing;
+  }
+
+  const { email, privateKey } = loadCredentials();
+  const driveAuth = new google.auth.JWT({
+    email,
+    key: privateKey,
+    scopes: ["https://www.googleapis.com/auth/drive"],
+  });
+  const driveWrite = google.drive({ version: "v3", auth: driveAuth });
+  const created = await driveWrite.files.create({
+    requestBody: {
+      name: OUTREACH_SHEETS_SUBFOLDER_NAME,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [parentFolderId],
+    },
+    fields: "id",
+    supportsAllDrives: true,
+  });
+  cachedOutreachSheetsFolderId = created.data.id!;
+  return cachedOutreachSheetsFolderId;
 }
 
 /**

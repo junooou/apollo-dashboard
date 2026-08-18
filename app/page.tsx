@@ -5,6 +5,7 @@ import { MultiSelect } from "./components/Controls";
 import { DeptChip } from "./components/DeptChip";
 import OutreachGenerator, {
   type OutreachPrefill,
+  type OutreachRecipientPrefill,
 } from "./components/OutreachGenerator";
 import LinkedInDraftGenerator from "./components/LinkedInDraftGenerator";
 import JobSignalOutreachView, {
@@ -203,6 +204,8 @@ type Stage = "idle" | "searching" | "review" | "enriching" | "done";
 export default function Dashboard() {
   const [workspace, setWorkspace] = useState<"leads" | "outreach" | "news" | "jobs">("leads");
   const [outreachPrefill, setOutreachPrefill] = useState<OutreachPrefill | null>(null);
+  const [outreachRecipientPrefill, setOutreachRecipientPrefill] =
+    useState<OutreachRecipientPrefill | null>(null);
   const [outreachChannel, setOutreachChannel] = useState<"email" | "linkedin">("email");
   const [jobSignalOutreachTarget, setJobSignalOutreachTarget] =
     useState<JobSignalOutreachTarget | null>(null);
@@ -252,6 +255,7 @@ export default function Dashboard() {
 
   const [contacts, setContacts] = useState<EnrichedContact[]>([]);
   const [summary, setSummary] = useState<RunSummary | null>(null);
+  const [preparingOutreach, setPreparingOutreach] = useState(false);
 
   const [settings, setSettings] = useState<Settings | null>(null);
   const [credits, setCredits] = useState<number | null>(null);
@@ -1063,6 +1067,7 @@ export default function Dashboard() {
     setLabelMode("new");
     setSelectedLabelName("");
     setNewLabelName("");
+    setOutreachRecipientPrefill(null);
   }
 
   function reset() {
@@ -1087,6 +1092,48 @@ export default function Dashboard() {
   }
 
   const busy = stage === "searching" || stage === "enriching";
+
+  async function handleUseContactsInOutreach() {
+    if (contacts.length === 0) return;
+
+    setPreparingOutreach(true);
+    setError(null);
+
+    try {
+      const companyName = selectedOrg?.name || company || "Outreach";
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const spreadsheetName = `${companyName} Outreach ${timestamp}`;
+      const created = await post<{ spreadsheetId: string; url: string }>("/api/sheets", {
+        mode: "create",
+        title: spreadsheetName,
+        sheetTitles: ["Contacts"],
+      });
+
+      await post<{ rowsPushed: number }>("/api/sheets", {
+        mode: "pushContacts",
+        spreadsheetId: created.spreadsheetId,
+        contacts,
+      });
+
+      setSheets((current) => [
+        { id: created.spreadsheetId, name: spreadsheetName },
+        ...current.filter((sheet) => sheet.id !== created.spreadsheetId),
+      ]);
+      setOutreachRecipientPrefill({
+        requestId: Date.now(),
+        spreadsheetId: created.spreadsheetId,
+        spreadsheetName,
+        spreadsheetUrl: created.url,
+      });
+      setOutreachChannel("email");
+      setWorkspace("outreach");
+      refreshSheetsIndex(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to prepare Outreach Studio contacts");
+    } finally {
+      setPreparingOutreach(false);
+    }
+  }
 
   function handleGenerateOutreachFromNews(trigger: NewsTrigger) {
     const companyName = trigger.score.company?.trim();
@@ -1119,6 +1166,7 @@ export default function Dashboard() {
       "Use this news event as the timely reason for reaching out. Do not invent facts beyond the supplied article context. Keep the outreach grounded in the event and Voncierge's approved playbook.",
     ].join("\n");
 
+    setOutreachRecipientPrefill(null);
     setOutreachPrefill({
       requestId: Date.now(),
       company: companyName,
@@ -1306,7 +1354,10 @@ export default function Dashboard() {
           </div>
 
           {outreachChannel === "email" ? (
-            <OutreachGenerator initialRequest={outreachPrefill} />
+            <OutreachGenerator
+              initialRequest={outreachPrefill}
+              recipientPrefill={outreachRecipientPrefill}
+            />
           ) : (
             <LinkedInDraftGenerator />
           )}
@@ -2800,6 +2851,23 @@ export default function Dashboard() {
             >
               <Tag size={15} />
               Tag in Apollo
+            </button>
+            <button
+              className="secondary"
+              onClick={handleUseContactsInOutreach}
+              disabled={contacts.length === 0 || preparingOutreach}
+            >
+              {preparingOutreach ? (
+                <>
+                  <span className="spinner" />
+                  Preparing Outreach Studio…
+                </>
+              ) : (
+                <>
+                  <Mail size={15} />
+                  Use in Outreach Studio
+                </>
+              )}
             </button>
           </div>
 

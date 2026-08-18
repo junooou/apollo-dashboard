@@ -1,4 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  postDraftOnlyCampaign,
+  type DraftOnlyCampaignSettings,
+} from "../../../../lib/gmass-draft-safety";
 
 type CampaignEmail = {
   label: string;
@@ -9,9 +13,17 @@ type CampaignEmail = {
 
 type GmassSequenceRequest = {
   emails: CampaignEmail[];
-  emailAddresses: string;
+  emailAddresses?: string;
+  sheetTarget?: {
+    spreadsheetId: string;
+    spreadsheetName?: string;
+  };
   campaignName?: string;
 };
+
+type GmassRecipientSource =
+  | { emailAddresses: string; listAddress?: never }
+  | { listAddress: string; emailAddresses?: never };
 
 type GmassCampaignResult = {
   campaignDraftId: string;
@@ -123,14 +135,14 @@ function getCampaignId(
 async function createRichTextCampaign({
   apiKey,
   fromEmail,
-  emailAddress,
+  recipientSource,
   subject,
   message,
   friendlyName,
 }: {
   apiKey: string;
   fromEmail: string;
-  emailAddress: string;
+  recipientSource: GmassRecipientSource;
   subject: string;
   message: string;
   friendlyName: string;
@@ -163,8 +175,7 @@ async function createRichTextCampaign({
           messageType:
             "html",
 
-          emailAddresses:
-            emailAddress,
+          ...recipientSource,
         }),
 
         cache:
@@ -208,37 +219,12 @@ async function createRichTextCampaign({
   // createDrafts:true keeps this in review/draft
   // workflow rather than intentionally launching it.
 
-  const campaignResponse =
-    await fetch(
-      `https://api.gmass.co/api/campaigns/${encodeURIComponent(
-        campaignDraftId,
-      )}`,
-      {
-        method: "POST",
-
-        headers: {
-          "Content-Type":
-            "application/json",
-
-          "X-apikey":
-            apiKey,
-        },
-
-        body: JSON.stringify({
-          createDrafts: true,
-
-          friendlyName,
-        }),
-
-        cache:
-          "no-store",
-      },
-    );
-
-  const campaignData =
-    await parseResponse(
-      campaignResponse,
-    );
+  const { response: campaignResponse, data: campaignData } =
+    await postDraftOnlyCampaign({
+      apiKey,
+      campaignDraftId,
+      settings: { friendlyName },
+    });
 
   if (!campaignResponse.ok) {
     throw new Error(
@@ -271,6 +257,82 @@ async function createRichTextCampaign({
     campaignId,
     data: campaignData,
   };
+}
+
+async function resolveSheetListAddress({
+  apiKey,
+  spreadsheetId,
+}: {
+  apiKey: string;
+  spreadsheetId: string;
+}): Promise<string> {
+  const worksheetsResponse = await fetch(
+    `https://api.gmass.co/api/sheets/${encodeURIComponent(spreadsheetId)}/worksheets`,
+    {
+      headers: { "X-apikey": apiKey },
+      cache: "no-store",
+    },
+  );
+  const worksheetsData = await parseResponse(worksheetsResponse);
+
+  if (!worksheetsResponse.ok) {
+    throw new Error(
+      `GMass could not access the Google Sheet: ${
+        typeof worksheetsData === "string" ? worksheetsData : JSON.stringify(worksheetsData)
+      }`,
+    );
+  }
+
+  const worksheets = Array.isArray(worksheetsData) ? worksheetsData : [];
+  const firstWorksheet = worksheets[0] as
+    | { worksheetId?: string | number; worksheetName?: string }
+    | undefined;
+
+  if (firstWorksheet?.worksheetId === undefined) {
+    throw new Error("GMass did not return a worksheet for the selected Google Sheet.");
+  }
+
+  const listResponse = await fetch("https://api.gmass.co/api/lists", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-apikey": apiKey,
+    },
+    body: JSON.stringify({
+      listSource: {
+        listSourceSheet: {
+          spreadsheetId,
+          worksheetId: String(firstWorksheet.worksheetId),
+          KeepDuplicates: false,
+          UpdateSheet: false,
+        },
+      },
+    }),
+    cache: "no-store",
+  });
+  const listData = await parseResponse(listResponse);
+
+  if (!listResponse.ok) {
+    throw new Error(
+      `GMass could not create a list from the Google Sheet: ${
+        typeof listData === "string" ? listData : JSON.stringify(listData)
+      }`,
+    );
+  }
+
+  const listAddress =
+    typeof listData === "object" &&
+    listData !== null &&
+    "listAddress" in listData &&
+    typeof listData.listAddress === "string"
+      ? listData.listAddress.trim()
+      : "";
+
+  if (!listAddress) {
+    throw new Error(`GMass did not return a listAddress: ${JSON.stringify(listData)}`);
+  }
+
+  return listAddress;
 }
 
 export async function POST(
@@ -318,6 +380,9 @@ export async function POST(
     const emailAddresses =
       body.emailAddresses?.trim();
 
+    const hasSheetTarget = body.sheetTarget !== undefined;
+    const spreadsheetId = body.sheetTarget?.spreadsheetId?.trim();
+
     const campaignName =
       body.campaignName?.trim() ||
       "Voncierge Outreach";
@@ -334,15 +399,22 @@ export async function POST(
       );
     }
 
-    if (!emailAddresses) {
+    if (Boolean(emailAddresses) === hasSheetTarget) {
       return NextResponse.json(
         {
           error:
-            "At least one recipient email is required.",
+            "Provide exactly one recipient source: emailAddresses or sheetTarget.",
         },
         {
           status: 400,
         },
+      );
+    }
+
+    if (hasSheetTarget && !spreadsheetId) {
+      return NextResponse.json(
+        { error: "sheetTarget.spreadsheetId is required." },
+        { status: 400 },
       );
     }
 
@@ -384,6 +456,18 @@ export async function POST(
         },
       );
     }
+
+    // Resolve and validate the recipient source before creating any GMass
+    // drafts. A Sheet lookup or list-creation failure must stop the sequence
+    // before even the first rich-text follow-up is created.
+    const recipientSource: GmassRecipientSource = spreadsheetId
+      ? {
+          listAddress: await resolveSheetListAddress({
+            apiKey,
+            spreadsheetId,
+          }),
+        }
+      : { emailAddresses: emailAddresses! };
 
     /**
      * ========================================
@@ -432,8 +516,7 @@ export async function POST(
 
           fromEmail,
 
-          emailAddress:
-            emailAddresses,
+          recipientSource,
 
           subject:
             followUp.subject?.trim() ||
@@ -489,7 +572,7 @@ export async function POST(
             messageType:
               "html",
 
-            emailAddresses,
+            ...recipientSource,
           }),
 
           cache:
@@ -554,34 +637,8 @@ export async function POST(
      * campaignId = rich-text/custom content
      */
 
-    const campaignSettings: {
-      createDrafts: boolean;
-      friendlyName: string;
-
-      stageOneDays?: number;
-      stageOneCampaignId?: number;
-      stageOneAction?: string;
-      stageOneThread?: string;
-
-      stageTwoDays?: number;
-      stageTwoCampaignId?: number;
-      stageTwoAction?: string;
-      stageTwoThread?: string;
-
-      stageThreeDays?: number;
-      stageThreeCampaignId?: number;
-      stageThreeAction?: string;
-      stageThreeThread?: string;
-
-      stageFourDays?: number;
-      stageFourCampaignId?: number;
-      stageFourAction?: string;
-      stageFourThread?: string;
-    } = {
-      createDrafts: true,
-
-      friendlyName:
-        campaignName,
+    const campaignSettings: DraftOnlyCampaignSettings = {
+      friendlyName: campaignName,
     };
 
     if (richFollowUps[0]) {
@@ -640,35 +697,12 @@ export async function POST(
         "same";
     }
 
-    const mainCampaignResponse =
-      await fetch(
-        `https://api.gmass.co/api/campaigns/${encodeURIComponent(
-          mainCampaignDraftId,
-        )}`,
-        {
-          method: "POST",
-
-          headers: {
-            "Content-Type":
-              "application/json",
-
-            "X-apikey":
-              apiKey,
-          },
-
-          body: JSON.stringify(
-            campaignSettings,
-          ),
-
-          cache:
-            "no-store",
-        },
-      );
-
-    const mainCampaignData =
-      await parseResponse(
-        mainCampaignResponse,
-      );
+    const { response: mainCampaignResponse, data: mainCampaignData } =
+      await postDraftOnlyCampaign({
+        apiKey,
+        campaignDraftId: mainCampaignDraftId,
+        settings: campaignSettings,
+      });
 
     if (!mainCampaignResponse.ok) {
       console.error(

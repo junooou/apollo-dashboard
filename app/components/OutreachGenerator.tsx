@@ -20,6 +20,13 @@ export type OutreachPrefill = {
   autoGenerate?: boolean;
 };
 
+export type OutreachRecipientPrefill = {
+  requestId: number;
+  spreadsheetId: string;
+  spreadsheetName: string;
+  spreadsheetUrl?: string;
+};
+
 /** An image picked from the device but not yet uploaded anywhere — lives
  *  only in this tab until the campaign is saved, at which point it's
  *  uploaded to Drive (staging or library, per `saveToLibrary`), embedded
@@ -313,8 +320,10 @@ function ImagePlacementPreview({
 
 export default function OutreachGenerator({
   initialRequest,
+  recipientPrefill,
 }: {
   initialRequest?: OutreachPrefill | null;
+  recipientPrefill?: OutreachRecipientPrefill | null;
 }) {
 
   const editorStyle = {
@@ -347,6 +356,8 @@ export default function OutreachGenerator({
   const [docUpdated, setDocUpdated] = useState(false);
 
   const [gmassRecipients, setGmassRecipients] = useState("");
+  const [gmassSheetSource, setGmassSheetSource] =
+    useState<Omit<OutreachRecipientPrefill, "requestId"> | null>(null);
   const [creatingGmassSequence, setCreatingGmassSequence] = useState(false);
   const [gmassSuccess, setGmassSuccess] = useState<string | null>(null);
   const [gmassError, setGmassError] = useState<string | null>(null);
@@ -381,6 +392,22 @@ export default function OutreachGenerator({
   const [imageError, setImageError] = useState<string | null>(null);
 
   const processedRequestId = useRef<number | null>(null);
+  const processedRecipientRequestId = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!recipientPrefill) return;
+    if (processedRecipientRequestId.current === recipientPrefill.requestId) return;
+
+    processedRecipientRequestId.current = recipientPrefill.requestId;
+
+    setGmassSheetSource({
+      spreadsheetId: recipientPrefill.spreadsheetId,
+      spreadsheetName: recipientPrefill.spreadsheetName,
+      spreadsheetUrl: recipientPrefill.spreadsheetUrl,
+    });
+    setGmassError(null);
+    setGmassSuccess(null);
+  }, [recipientPrefill]);
 
   useEffect(() => {
     if (!initialRequest) return;
@@ -1166,7 +1193,7 @@ export default function OutreachGenerator({
 
     const recipients = gmassRecipients.trim();
 
-    if (!recipients) {
+    if (!gmassSheetSource && !recipients) {
       setGmassError("Enter at least one recipient email address.");
       return;
     }
@@ -1188,7 +1215,14 @@ export default function OutreachGenerator({
             subject,
             body,
           })),
-          emailAddresses: recipients,
+          ...(gmassSheetSource
+            ? {
+                sheetTarget: {
+                  spreadsheetId: gmassSheetSource.spreadsheetId,
+                  spreadsheetName: gmassSheetSource.spreadsheetName,
+                },
+              }
+            : { emailAddresses: recipients }),
           campaignName: campaign.campaignName,
         }),
       });
@@ -1852,26 +1886,57 @@ export default function OutreachGenerator({
               account before sending.
             </div>
 
-            <div className="field" style={{ marginBottom: 12 }}>
-              <label htmlFor="gmass-recipients">Recipient email(s)</label>
+            {gmassSheetSource ? (
+              <div className="notice info" style={{ marginBottom: 12 }}>
+                <div>
+                  Recipient source: <strong>{gmassSheetSource.spreadsheetName}</strong>
+                </div>
+                <div className="row" style={{ marginTop: 8 }}>
+                  {gmassSheetSource.spreadsheetUrl && (
+                    <a
+                      href={gmassSheetSource.spreadsheetUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open Google Sheet
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => {
+                      setGmassSheetSource(null);
+                      setGmassError(null);
+                      setGmassSuccess(null);
+                    }}
+                    disabled={creatingGmassSequence}
+                  >
+                    Use email addresses instead
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="field" style={{ marginBottom: 12 }}>
+                <label htmlFor="gmass-recipients">Recipient email(s)</label>
 
-              <textarea
-                id="gmass-recipients"
-                value={gmassRecipients}
-                onChange={(event) => {
-                  setGmassRecipients(event.target.value);
-                  setGmassError(null);
-                  setGmassSuccess(null);
-                }}
-                placeholder="e.g. john@company.com, jane@company.com"
-                rows={3}
-                disabled={creatingGmassSequence}
-                style={{
-                  ...editorStyle,
-                  resize: "vertical",
-                }}
-              />
-            </div>
+                <textarea
+                  id="gmass-recipients"
+                  value={gmassRecipients}
+                  onChange={(event) => {
+                    setGmassRecipients(event.target.value);
+                    setGmassError(null);
+                    setGmassSuccess(null);
+                  }}
+                  placeholder="e.g. john@company.com, jane@company.com"
+                  rows={3}
+                  disabled={creatingGmassSequence}
+                  style={{
+                    ...editorStyle,
+                    resize: "vertical",
+                  }}
+                />
+              </div>
+            )}
 
             <div className="small muted" style={{ marginBottom: 14 }}>
               Sequence: <strong>{campaign.emails.length} emails</strong>
@@ -1882,7 +1947,7 @@ export default function OutreachGenerator({
               onClick={createGmassSequence}
               disabled={
                 creatingGmassSequence ||
-                !gmassRecipients.trim() ||
+                (!gmassSheetSource && !gmassRecipients.trim()) ||
                 campaign.emails.length === 0
               }
             >

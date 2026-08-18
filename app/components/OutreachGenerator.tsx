@@ -346,6 +346,11 @@ export default function OutreachGenerator({
   const [docId, setDocId] = useState<string | null>(null);
   const [docUpdated, setDocUpdated] = useState(false);
 
+  const [gmassRecipients, setGmassRecipients] = useState("");
+  const [creatingGmassSequence, setCreatingGmassSequence] = useState(false);
+  const [gmassSuccess, setGmassSuccess] = useState<string | null>(null);
+  const [gmassError, setGmassError] = useState<string | null>(null);
+
   const [saveTarget, setSaveTarget] = useState<"new" | "existing">("new");
   const [existingDocs, setExistingDocs] = useState<
     { id: string; name: string }[]
@@ -1151,6 +1156,74 @@ export default function OutreachGenerator({
     }
   }
 
+  async function createGmassSequence() {
+    if (!campaign) return;
+
+    if (campaign.emails.length === 0) {
+      setGmassError("This campaign does not contain any emails.");
+      return;
+    }
+
+    const recipients = gmassRecipients.trim();
+
+    if (!recipients) {
+      setGmassError("Enter at least one recipient email address.");
+      return;
+    }
+
+    setCreatingGmassSequence(true);
+    setGmassError(null);
+    setGmassSuccess(null);
+
+    try {
+      const response = await fetch("/api/gmass/create-draft", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          emails: campaign.emails.map(({ label, topic, subject, body }) => ({
+            label,
+            topic,
+            subject,
+            body,
+          })),
+          emailAddresses: recipients,
+          campaignName: campaign.campaignName,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        const detail =
+          typeof data.details === "string"
+            ? data.details
+            : data.details
+              ? JSON.stringify(data.details)
+              : "";
+
+        throw new Error(
+          detail ||
+            data.error ||
+            "Failed to create GMass rich-text sequence.",
+        );
+      }
+
+      setGmassSuccess(
+        "GMass rich-text sequence created successfully in Amanda's account.",
+      );
+    } catch (err) {
+      setGmassError(
+        err instanceof Error
+          ? err.message
+          : "Failed to create GMass rich-text sequence.",
+      );
+    } finally {
+      setCreatingGmassSequence(false);
+    }
+  }
+
   return (
     <section
       style={{
@@ -1755,6 +1828,85 @@ export default function OutreachGenerator({
               )}
 
             </div>
+          </div>
+
+          <div
+            style={{
+              marginTop: 18,
+              padding: 18,
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+            }}
+          >
+            <h3 style={{ marginTop: 0, marginBottom: 6 }}>
+              Send to GMass
+            </h3>
+
+            <div
+              className="small muted"
+              style={{ marginBottom: 14, lineHeight: 1.5 }}
+            >
+              Creates the full campaign as a GMass rich-text sequence. Follow-ups
+              use the generated emails and stay in the same thread. Nothing should
+              be launched automatically; review the campaign in Amanda&apos;s GMass
+              account before sending.
+            </div>
+
+            <div className="field" style={{ marginBottom: 12 }}>
+              <label htmlFor="gmass-recipients">Recipient email(s)</label>
+
+              <textarea
+                id="gmass-recipients"
+                value={gmassRecipients}
+                onChange={(event) => {
+                  setGmassRecipients(event.target.value);
+                  setGmassError(null);
+                  setGmassSuccess(null);
+                }}
+                placeholder="e.g. john@company.com, jane@company.com"
+                rows={3}
+                disabled={creatingGmassSequence}
+                style={{
+                  ...editorStyle,
+                  resize: "vertical",
+                }}
+              />
+            </div>
+
+            <div className="small muted" style={{ marginBottom: 14 }}>
+              Sequence: <strong>{campaign.emails.length} emails</strong>
+            </div>
+
+            <button
+              type="button"
+              onClick={createGmassSequence}
+              disabled={
+                creatingGmassSequence ||
+                !gmassRecipients.trim() ||
+                campaign.emails.length === 0
+              }
+            >
+              {creatingGmassSequence ? (
+                <>
+                  <span className="spinner" />
+                  Creating GMass Sequence…
+                </>
+              ) : (
+                "Create GMass Sequence"
+              )}
+            </button>
+
+            {gmassSuccess && (
+              <div className="notice info" style={{ marginTop: 14 }}>
+                {gmassSuccess}
+              </div>
+            )}
+
+            {gmassError && (
+              <div className="notice error" style={{ marginTop: 14 }}>
+                {gmassError}
+              </div>
+            )}
           </div>
         </div>
       )}

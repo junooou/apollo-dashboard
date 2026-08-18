@@ -6,12 +6,14 @@ import {
     listCampaignDocsInFolder,
     listDocumentTabs,
   } from "@/lib/docs";
+import type { EmailImage } from "@/lib/email-images";
 
 type CampaignEmail = {
   label: string;
   topic: string;
   subject: string;
   body: string;
+  images?: EmailImage[];
 };
 
 type SaveCampaignRequest = {

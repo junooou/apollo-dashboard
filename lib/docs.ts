@@ -1,4 +1,10 @@
 import { google, docs_v1 } from "googleapis";
+import {
+  ensurePublicReadableImageUrl,
+  deleteStagingImages,
+  type EmailImage,
+} from "@/lib/email-images";
+import { splitBodyIntoParagraphs } from "@/lib/email-image-constants";
 
 function getGoogleAuth() {
   const clientEmail =
@@ -28,6 +34,7 @@ type CampaignEmail = {
   topic: string;
   subject: string;
   body: string;
+  images?: EmailImage[];
 };
 
 type CampaignDocument = {
@@ -39,10 +46,20 @@ type CampaignDocument = {
   industry?: string;
 };
 
-function buildDocumentText(
+/** A unique text token standing in for an image, plus which image it maps
+ *  to — resolved to a real document index later via locatePlaceholders,
+ *  once the text has actually been inserted and Google has assigned real
+ *  indices to it. */
+type ImagePlaceholder = {
+  token: string;
+  image: EmailImage;
+};
+
+function buildDocumentContent(
   campaign: CampaignDocument,
-) {
+): { text: string; imagePlaceholders: ImagePlaceholder[] } {
   const sections: string[] = [];
+  const imagePlaceholders: ImagePlaceholder[] = [];
 
   sections.push(campaign.campaignName);
   sections.push("");
@@ -69,6 +86,8 @@ function buildDocumentText(
   sections.push(campaign.sequenceRationale);
   sections.push("");
 
+  let placeholderCounter = 0;
+
   for (const email of campaign.emails) {
     sections.push(
       "────────────────────────────────────────",
@@ -82,11 +101,149 @@ function buildDocumentText(
 
     sections.push(`Subject: ${email.subject}`);
     sections.push("");
-    sections.push(email.body);
-    sections.push("");
+
+    const paragraphs = splitBodyIntoParagraphs(email.body);
+    const images = email.images ?? [];
+    const lastGap = paragraphs.length - 1;
+
+    const pushImagesAtGap = (gap: number) => {
+      for (const image of images) {
+        if (image.positionAfterParagraph !== gap) continue;
+
+        // Unique per placeholder so it can never collide with real body text.
+        const token = `IMG_PLACEHOLDER_${placeholderCounter++}`;
+        sections.push(token);
+        imagePlaceholders.push({ token, image });
+        sections.push("");
+      }
+    };
+
+    paragraphs.forEach((paragraph, index) => {
+      sections.push(paragraph);
+      sections.push("");
+      pushImagesAtGap(index);
+    });
+
+    // Anything with no explicit position, or a position pointing at a
+    // paragraph gap that no longer exists (e.g. the user repositioned an
+    // image, then edited the body and removed that paragraph before
+    // saving), lands at the end of the body — today's only behavior.
+    for (const image of images) {
+      const gap = image.positionAfterParagraph;
+      const hasValidGap = gap !== undefined && gap >= 0 && gap <= lastGap;
+
+      if (hasValidGap) continue;
+
+      const token = `IMG_PLACEHOLDER_${placeholderCounter++}`;
+      sections.push(token);
+      imagePlaceholders.push({ token, image });
+      sections.push("");
+    }
   }
 
-  return sections.join("\n");
+  const text = sections.join("\n");
+
+  return { text, imagePlaceholders };
+}
+
+/**
+ * Walks a Docs structural-content tree looking for each placeholder token's
+ * literal text and returns its real, Google-assigned document index. Doing
+ * this against the live document (rather than computing offsets by hand
+ * from the string we sent) sidesteps having to replicate the Docs API's own
+ * index accounting, which does not map 1:1 onto plain JS string length —
+ * paragraph/segment boundaries carry their own rules for what a
+ * deleteContentRange may span.
+ */
+function locatePlaceholders(
+  content: docs_v1.Schema$StructuralElement[] | undefined,
+  imagePlaceholders: ImagePlaceholder[],
+): { startIndex: number; length: number; image: EmailImage }[] {
+  const remaining = new Map(imagePlaceholders.map((p) => [p.token, p]));
+  const located: { startIndex: number; length: number; image: EmailImage }[] =
+    [];
+
+  for (const element of content ?? []) {
+    for (const paragraphElement of element.paragraph?.elements ?? []) {
+      const run = paragraphElement.textRun;
+      const runText = run?.content;
+      const runStart = paragraphElement.startIndex;
+
+      if (!runText || runStart === undefined || runStart === null) continue;
+
+      for (const [token, placeholder] of remaining) {
+        const tokenOffset = runText.indexOf(token);
+        if (tokenOffset === -1) continue;
+
+        located.push({
+          startIndex: runStart + tokenOffset,
+          length: token.length,
+          image: placeholder.image,
+        });
+        remaining.delete(token);
+      }
+    }
+  }
+
+  return located;
+}
+
+/**
+ * Deletes any embedded image's ephemeral staging Drive copy now that Docs
+ * has copied its bytes into the document itself. Never throws — the Doc
+ * save has already succeeded by the time this runs, so a cleanup failure
+ * must not fail the overall save.
+ */
+async function cleanupStagingImages(
+  imagePlaceholders: ImagePlaceholder[],
+): Promise<void> {
+  const stagingImageIds = imagePlaceholders
+    .filter((p) => !p.image.isLibraryImage)
+    .map((p) => p.image.id);
+
+  if (stagingImageIds.length === 0) return;
+
+  try {
+    await deleteStagingImages(stagingImageIds);
+  } catch (error) {
+    console.error("Staging image cleanup failed (non-fatal):", error);
+  }
+}
+
+/**
+ * Resolves each placeholder to a batchUpdate request pair (delete the
+ * placeholder text, insert the image in its place). Processed in descending
+ * index order so that earlier, not-yet-processed positions are never
+ * shifted by an edit made later in the same batchUpdate — batchUpdate does
+ * not auto-adjust indices across requests for you.
+ */
+async function buildImageRequests(
+  located: { startIndex: number; length: number; image: EmailImage }[],
+  tabId: string | undefined,
+): Promise<docs_v1.Schema$Request[]> {
+  const sorted = [...located].sort((a, b) => b.startIndex - a.startIndex);
+  const requests: docs_v1.Schema$Request[] = [];
+
+  for (const placeholder of sorted) {
+    const uri = await ensurePublicReadableImageUrl(placeholder.image.id);
+    const startIndex = placeholder.startIndex;
+    const endIndex = startIndex + placeholder.length;
+
+    requests.push({
+      deleteContentRange: {
+        range: { tabId, startIndex, endIndex },
+      },
+    });
+
+    requests.push({
+      insertInlineImage: {
+        location: { tabId, index: startIndex },
+        uri,
+      },
+    });
+  }
+
+  return requests;
 }
 
 export async function createCampaignDoc(
@@ -134,8 +291,8 @@ export async function createCampaignDoc(
     );
   }
 
-  const documentText =
-    buildDocumentText(campaign);
+  const { text: documentText, imagePlaceholders } =
+    buildDocumentContent(campaign);
 
   await docs.documents.batchUpdate({
     documentId,
@@ -153,6 +310,23 @@ export async function createCampaignDoc(
       ],
     },
   });
+
+  if (imagePlaceholders.length > 0) {
+    const currentDocument = await docs.documents.get({ documentId });
+    const located = locatePlaceholders(
+      currentDocument.data.body?.content,
+      imagePlaceholders,
+    );
+
+    await docs.documents.batchUpdate({
+      documentId,
+      requestBody: {
+        requests: await buildImageRequests(located, undefined),
+      },
+    });
+
+    await cleanupStagingImages(imagePlaceholders);
+  }
 
   return {
     documentId,
@@ -193,10 +367,10 @@ export async function updateCampaignDoc(
   const endIndex =
     lastElement?.endIndex ?? 1;
 
-  const documentText =
-    buildDocumentText(campaign);
+  const { text: documentText, imagePlaceholders } =
+    buildDocumentContent(campaign);
 
-  const requests: any[] = [];
+  const requests: docs_v1.Schema$Request[] = [];
 
   if (endIndex > 2) {
     requests.push({
@@ -225,6 +399,23 @@ export async function updateCampaignDoc(
       requests,
     },
   });
+
+  if (imagePlaceholders.length > 0) {
+    const updatedDocument = await docs.documents.get({ documentId });
+    const located = locatePlaceholders(
+      updatedDocument.data.body?.content,
+      imagePlaceholders,
+    );
+
+    await docs.documents.batchUpdate({
+      documentId,
+      requestBody: {
+        requests: await buildImageRequests(located, undefined),
+      },
+    });
+
+    await cleanupStagingImages(imagePlaceholders);
+  }
 
   await drive.files.update({
     fileId: documentId,
@@ -385,7 +576,8 @@ export async function insertIntoDocTab(
     endIndex = lastElement?.endIndex ?? 1;
   }
 
-  const documentText = buildDocumentText(campaign);
+  const { text: documentText, imagePlaceholders } =
+    buildDocumentContent(campaign);
 
   const requests: docs_v1.Schema$Request[] = [];
 
@@ -417,6 +609,27 @@ export async function insertIntoDocTab(
       requests,
     },
   });
+
+  if (imagePlaceholders.length > 0) {
+    const refreshedDocument = tabId
+      ? await docs.documents.get({ documentId, includeTabsContent: true })
+      : await docs.documents.get({ documentId });
+
+    const refreshedContent = tabId
+      ? findTabBody(refreshedDocument.data.tabs, tabId)?.content
+      : refreshedDocument.data.body?.content;
+
+    const located = locatePlaceholders(refreshedContent, imagePlaceholders);
+
+    await docs.documents.batchUpdate({
+      documentId,
+      requestBody: {
+        requests: await buildImageRequests(located, tabId),
+      },
+    });
+
+    await cleanupStagingImages(imagePlaceholders);
+  }
 
   return {
     documentId,

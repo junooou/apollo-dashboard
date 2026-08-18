@@ -190,3 +190,22 @@ folder-structure norms in general.
   `fetch` has no Node-only dependency, so it's safe from
   `instrumentation.ts`, and it defers the actual `googleapis` usage to a
   route that's genuinely Node-only.
+
+---
+
+## Feature: Outreach email image attachments (`lib/email-images.ts`)
+
+- **`sharp` ships a platform-specific prebuilt `libvips` binary**, resolved
+  at `npm install` time for whatever OS/arch it's installed on. If the
+  Docker build stage's OS/arch doesn't match the final runtime image (e.g. a
+  multi-stage build that runs `npm install` on one base image and copies
+  `node_modules` into a different one), the binary won't match at runtime
+  and image uploads will fail. Run `npm install` in the same base
+  image/arch as the final container, not copied in from a mismatched stage.
+- The per-process module-level folder-id caches
+  (`cachedEmailImagesLibraryFolderId`, `cachedEmailImagesStagingFolderId`)
+  are the same category of thing as `cachedOutreachSheetsFolderId` above —
+  each server instance resolves its own copy independently. Unlike the
+  Sheets index this is cheap and idempotent to redo per instance, so it
+  doesn't need the same urgency, but it's worth being aware of if this ever
+  needs to be made instance-consistent.

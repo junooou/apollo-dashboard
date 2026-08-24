@@ -9,3 +9,5 @@ data/news-candidates.json
 data/news-scored.json
 data/news-history.json
 data/job-signals-history.json
+data/news-trigger-keywords.json
+data/news-trigger-filters.json

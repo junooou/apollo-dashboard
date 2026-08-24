@@ -31,6 +31,7 @@ import {
   Users,
 } from "./components/Icons";
 import { buildRunLog } from "@/lib/runlog";
+import { groupNewsTriggersByCompany } from "@/lib/news-trigger-grouping";
 import {
   COUNTRIES,
   DEPARTMENTS,
@@ -336,6 +337,20 @@ export default function Dashboard() {
   const [newsTriggersError, setNewsTriggersError] = useState<string | null>(null);
   const [showIgnoredNews, setShowIgnoredNews] = useState(false);
 
+  // Region filter for the Google News source of News Triggers — adds/removes
+  // whole keyword sets (lib/google-news-triggers.ts) rather than re-biasing
+  // the same fixed query. Persisted server-side via /api/news-trigger-filters
+  // so it survives a refresh; a change here applies on the NEXT "Refresh
+  // news" click, not retroactively to already-scored articles.
+  const [newsRegionOptions, setNewsRegionOptions] = useState<string[]>([]);
+  const [newsActiveRegions, setNewsActiveRegions] = useState<string[]>([]);
+  const [newsRegionsLoaded, setNewsRegionsLoaded] = useState(false);
+
+  const groupedNewsTriggers = useMemo(
+    () => groupNewsTriggersByCompany(newsTriggers),
+    [newsTriggers],
+  );
+
   // Job Signals — MyCareersFuture is a free, unauthenticated public API, so
   // unlike News Triggers this fetches live on every mount/refresh rather
   // than waiting for a manual, cost-aware "refresh" click. See the mount
@@ -516,6 +531,46 @@ export default function Dashboard() {
       loadNewsTriggers(false);
     }
   }, [workspace, newsTriggersLoaded, newsTriggersLoading, loadNewsTriggers]);
+
+  useEffect(() => {
+    if (workspace !== "news" || newsRegionsLoaded) return;
+
+    let cancelled = false;
+
+    fetch("/api/news-trigger-filters")
+      .then((r) => r.json())
+      .then((d: { regions?: string[]; active?: string[] }) => {
+        if (cancelled) return;
+        setNewsRegionOptions(d.regions ?? []);
+        setNewsActiveRegions(d.active ?? []);
+      })
+      .catch(() => {
+        /* Non-critical — the region filter just won't render until a retry. */
+      })
+      .finally(() => {
+        if (!cancelled) setNewsRegionsLoaded(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace, newsRegionsLoaded]);
+
+  function toggleNewsRegion(region: string) {
+    const next = newsActiveRegions.includes(region)
+      ? newsActiveRegions.filter((r) => r !== region)
+      : [...newsActiveRegions, region];
+
+    setNewsActiveRegions(next);
+
+    fetch("/api/news-trigger-filters", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active: next }),
+    }).catch(() => {
+      /* Best-effort — the next region-filter load will re-sync from disk. */
+    });
+  }
 
   const refreshCredits = useCallback(async () => {
     try {
@@ -1377,6 +1432,28 @@ export default function Dashboard() {
             </div>
 
             <div className="news-trigger-toolbar">
+              {newsRegionsLoaded && newsRegionOptions.length > 0 && (
+                <div
+                  className="news-region-filter"
+                  title="Adds or removes whole keyword sets from the Google News source. Applies on the next Refresh news."
+                >
+                  {newsRegionOptions.map((region) => {
+                    const active = newsActiveRegions.includes(region);
+                    return (
+                      <button
+                        key={region}
+                        type="button"
+                        className={`region-pill${active ? " active" : ""}`}
+                        onClick={() => toggleNewsRegion(region)}
+                        aria-pressed={active}
+                      >
+                        {region}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               {newsTriggerCache?.scoredAt && (
                 <span className="small muted">
                   Scored {formatNewsTriggerDate(newsTriggerCache.scoredAt)}
@@ -1452,16 +1529,21 @@ export default function Dashboard() {
                 </section>
               ) : (
                 <div className="news-trigger-grid">
-                  {newsTriggers.map((trigger) => {
+                  {groupedNewsTriggers.map((group) => {
+                    const trigger = group.primary;
                     const score = trigger.score.relevanceScore;
                     const scoreBand =
                       score >= 85 ? "high" : score >= 70 ? "medium" : "low";
+                    const groupIsNew = group.articles.some((a) => a.isNew);
+                    const relatedArticles = group.articles.filter(
+                      (a) => a.id !== trigger.id,
+                    );
 
                     return (
                       <article
                         className="news-trigger-card"
                         data-score-band={scoreBand}
-                        key={trigger.id}
+                        key={group.groupKey}
                       >
                         <div className="news-trigger-card-top">
                           <div className="news-trigger-identity">
@@ -1478,6 +1560,12 @@ export default function Dashboard() {
                                   )}
                                   <span>{trigger.domain}</span>
                                   <span>{formatNewsTriggerDate(trigger.published)}</span>
+                                  {relatedArticles.length > 0 && (
+                                    <span>
+                                      +{relatedArticles.length} more{" "}
+                                      {relatedArticles.length === 1 ? "story" : "stories"}
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                             </div>
@@ -1490,7 +1578,7 @@ export default function Dashboard() {
                               gap: 7,
                             }}
                           >
-                            {trigger.isNew && (
+                            {groupIsNew && (
                               <span className="news-new-pill">
                                 ✦ New
                               </span>
@@ -1539,6 +1627,37 @@ export default function Dashboard() {
                                 {capability}
                               </span>
                             ))}
+                          </div>
+                        )}
+
+                        {relatedArticles.length > 0 && (
+                          <div className="news-trigger-related">
+                            <span className="news-trigger-label">
+                              ALSO ABOUT {(trigger.score.company || "THIS COMPANY").toUpperCase()}
+                            </span>
+
+                            <div className="ignored-news-list">
+                              {relatedArticles.map((related) => (
+                                <div className="ignored-news-row" key={related.id}>
+                                  <span className="ignored-news-score">
+                                    {related.score.relevanceScore}
+                                  </span>
+
+                                  <div className="ignored-news-copy">
+                                    <a
+                                      href={related.url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                    >
+                                      {related.title}
+                                    </a>
+                                    <p>
+                                      {related.domain} · {formatNewsTriggerDate(related.published)}
+                                    </p>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         )}
 

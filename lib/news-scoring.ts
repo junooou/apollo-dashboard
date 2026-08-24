@@ -284,6 +284,13 @@ export async function scoreNewsTriggers(
 
     store: false,
 
+    // Lets usage for this call be isolated in the OpenAI dashboard
+    // (Usage → filter by metadata) from any other feature sharing the
+    // same API key, e.g. the Outreach Studio's generate-template call.
+    metadata: {
+      feature: "news-triggers",
+    },
+
     input: buildScoringPrompt(articles),
 
     text: {

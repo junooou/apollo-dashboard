@@ -2585,7 +2585,47 @@ section:has(> div > h2:first-child) {
     padding: 8px 14px;
     font-size: 0.74rem;
   }
-  
+
+  .news-region-filter {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .region-pill {
+    padding: 5px 11px;
+
+    color: #687487;
+    background: #f5f7fa;
+
+    border: 1px solid #e5e9f0;
+    border-radius: 999px;
+
+    font-size: 0.68rem;
+    font-weight: 620;
+    white-space: nowrap;
+
+    cursor: pointer;
+
+    transition:
+      background 150ms ease,
+      color 150ms ease,
+      border-color 150ms ease;
+  }
+
+  .region-pill:hover {
+    color: var(--accent);
+    border-color: #d4dff8;
+  }
+
+  .region-pill.active {
+    color: var(--accent);
+    background: var(--accent-soft);
+
+    border-color: #d4dff8;
+  }
+
   /* ------------------------------------------------------------------------
      SUMMARY STRIP
      ------------------------------------------------------------------------ */
@@ -2981,6 +3021,14 @@ section:has(> div > h2:first-child) {
     line-height: 1.15;
   }
   
+  .news-trigger-related {
+    margin: 4px 0 15px;
+  }
+
+  .news-trigger-related .ignored-news-list {
+    margin-top: 8px;
+  }
+
   /* ------------------------------------------------------------------------
      CARD ACTIONS
      ------------------------------------------------------------------------ */

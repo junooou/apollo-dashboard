@@ -12,6 +12,10 @@ import {
 } from "@/lib/currents";
 
 import {
+  fetchGoogleNewsTriggerCandidates,
+} from "@/lib/google-news-triggers";
+
+import {
   scoreNewsTriggers,
   type ScoredNewsTrigger,
 } from "@/lib/news-scoring";
@@ -348,12 +352,39 @@ async function refreshNews(
   const refreshAt =
     new Date().toISOString();
 
-  const freshArticles =
-    await fetchNewsTriggerCandidates();
+  /*
+   * Two independent sources feed the same pipeline from here on:
+   * Currents (paid, structured search) and Google News RSS (free,
+   * keyword-driven — see data/news-trigger-keywords.json). Each is
+   * guarded separately so one source failing (e.g. no CURRENTS_API_KEY,
+   * or Google RSS having a bad moment) doesn't take down the other.
+   */
+  const [currentsArticles, googleArticles] = await Promise.all([
+    fetchNewsTriggerCandidates().catch((error) => {
+      console.error("Currents fetch failed:", error);
+      return [] as NewsTriggerArticle[];
+    }),
+    fetchGoogleNewsTriggerCandidates().catch((error) => {
+      console.error("Google News RSS fetch failed:", error);
+      return [] as NewsTriggerArticle[];
+    }),
+  ]);
 
   console.log(
-    `Currents returned ${freshArticles.length} trusted articles.`,
+    `Currents returned ${currentsArticles.length} trusted articles; Google News RSS returned ${googleArticles.length}.`,
   );
+
+  // De-dupe the two sources against EACH OTHER (same story can easily be
+  // picked up by both) before diffing against history below, which only
+  // de-dupes against articles already seen in a PREVIOUS refresh.
+  const freshArticles: NewsTriggerArticle[] = [];
+  const seenThisRefresh = new Set<string>();
+  for (const article of [...currentsArticles, ...googleArticles]) {
+    const key = article.url ? normalizeUrl(article.url) : `id:${article.id}`;
+    if (seenThisRefresh.has(key)) continue;
+    seenThisRefresh.add(key);
+    freshArticles.push(article);
+  }
 
   const existingByKey =
     new Map<

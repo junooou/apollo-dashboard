@@ -97,7 +97,7 @@ apollo-dashboard/
 │
 ├── AGENTS.md                ← Technical deep-dive: architecture, gotchas, hard-won lessons (for developers/AI assistants)
 ├── CLAUDE.md / GEMINI.md     ← Point AI coding assistants at AGENTS.md
-├── README.md                  ← Setup instructions + feature walkthrough
+├── INTERNAL_WORKFLOW.md                  ← Setup instructions + feature walkthrough
 ├── USER_MANUAL.md              ← THIS guide's sibling: how to use the app (non-technical)
 ├── CODEBASE_GUIDE.md            ← This file
 ├── AWS_DEPLOYMENT_NOTES.md       ← Running list of what changes when this moves to AWS for the team
@@ -332,7 +332,7 @@ the change may be wrong, not the test.
 ## 9. Where to go next
 
 - **Using the app day-to-day:** see `USER_MANUAL.md`.
-- **Setup instructions and full feature list:** see `README.md`.
+- **Setup instructions and full feature list:** see `INTERNAL_WORKFLOW.md`.
 - **Deep technical detail, API gotchas, and the reasoning behind
   non-obvious decisions:** see `AGENTS.md` — this is the canonical technical
   reference and should be read before changing any filtering or enrichment

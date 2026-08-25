@@ -1,357 +1,385 @@
-# Apollo Lead Sourcing Dashboard
+# Outbound Intelligence
 
-A local web app, branded on-screen as **Outbound Intelligence**, that turns the
-manual Apollo sourcing workflow into a repeatable tool: search a company, review
-who the filter picked, approve the shortlist, and get a CSV in the same format
-as every file already in `../Apollo Lead Generation/`. A second tab, **Outreach
-Studio**, turns a company or industry into a multi-email outreach sequence and
-can save it straight to a Google Doc.
+A full-stack outbound prospecting and sales-intelligence dashboard that turns a manual lead-sourcing workflow into a structured, repeatable pipeline.
 
-The rules it applies come from `../Apollo Lead Generation/context.md` — the
-priority roles, the exclusions, the credit policy, and the lessons from previous
-sourcing runs.
+The platform combines **Apollo prospecting and enrichment**, configurable lead qualification, credit-aware workflows, Google Sheets/Drive integrations, AI-assisted outreach generation, hiring signals, news triggers, and campaign handoff tools in one interface.
 
-**New here?** Read **[`USER_MANUAL.md`](./USER_MANUAL.md)** for a non-technical,
-step-by-step walkthrough of the whole app — no coding knowledge needed. Developers
-and AI assistants should read **[`CODEBASE_GUIDE.md`](./CODEBASE_GUIDE.md)** for a
-plain-language map of the folder structure, styling, and wording conventions, and
-**[`AGENTS.md`](./AGENTS.md)** for the full technical reference. Both `USER_MANUAL.md`
-and `CODEBASE_GUIDE.md` are living documents — update them whenever you ship a
-feature that changes what's described in them.
+Rather than enriching every result immediately, the system separates **search → review → enrichment** so users can inspect who was selected, understand why they matched, and control Apollo credit spend before revealing contact data.
 
-**This app is moving to AWS for team-wide use.** Everything below still
-describes today's local, single-user setup. See
-**[`AWS_DEPLOYMENT_NOTES.md`](./AWS_DEPLOYMENT_NOTES.md)** for the running
-list of what has to change before/during that move.
+> **Note:** This project is designed for local/internal use and depends on third-party services such as Apollo, OpenAI, Google APIs, and GMass. It should not be exposed directly to the public internet without authentication and production infrastructure.
 
-## Setup
+---
 
-You need **Node 20+** and an **Apollo API key**. Google Sheets/Docs export and
-the outreach email generator are optional add-ons, each gated behind their own
-key — the core sourcing workflow runs without either.
+## What it does
 
-```bash
-cd apollo-dashboard
-npm install
-cp .env.local.example .env.local   # then paste your keys into it
-npm run check-key                  # pre-flight: verifies the Apollo key works
-npm run dev                        # http://localhost:3100
-```
+### Lead sourcing
 
-### Getting an Apollo API key
+Search for a company or domain through Apollo, identify relevant decision-makers, review the shortlist, and selectively enrich only the contacts worth paying for.
 
-Apollo → **Settings → Integrations → API → API Keys**. The key needs master
-scope to reach both the search and enrichment endpoints.
+The sourcing workflow supports:
 
-This is required. The MCP connector used inside Claude Code cannot be used here —
-MCP connectors only exist inside an AI client and cannot be called from a web
-server. The key is read server-side from `.env.local` and is never sent to the
-browser.
+- Company and organization resolution
+- Region, country, department, and seniority filters
+- Rule-based candidate scoring
+- Explainable inclusion/exclusion decisions
+- Duplicate-contact detection
+- Email-availability checks before enrichment
+- Employer/domain validation after enrichment
+- Optional waterfall enrichment
+- Apollo credit estimation and usage tracking
+- CSV, Google Sheets, and Apollo-list outputs
 
-### Getting an OpenAI API key (optional — outreach email generator)
+### Outreach Studio
 
-platform.openai.com → **API keys → Create new secret key**. Powers
-`app/api/generate-template/route.ts` — see
-[Outreach email generator](#outreach-email-generator) below. Without
-`OPENAI_API_KEY` set, that one feature errors; the rest of the app is
-unaffected.
+Generate multi-email outreach sequences for a specific company or industry using OpenAI.
 
-### Google Sheets/Docs export (optional)
+Sequences include:
 
-A service account, not a personal API key — see `GOOGLE_SHEETS_SETUP.md` for
-the full walkthrough, and `npm run check-drive` to verify it once configured.
+- Campaign positioning and rationale
+- Subject lines and email bodies
+- Multi-step follow-up sequences
+- Natural-language revision requests
+- Google Docs export
+- GMass campaign draft integration
 
-If `GOOGLE_PARENT_FOLDER_ID` is set, the moment you first load the app it
-scans every spreadsheet reachable from that shared Drive folder — including
-subfolders — and caches every contact row in memory — the **"Loading
-Voncierge Outreach…"** pill in the header is that scan running. It only
-happens once per server run (a ↻ button on the pill forces a re-scan, and
-pushing new contacts triggers one automatically); every "already sourced"
-check afterwards reads the cache instead of re-scanning Google Sheets from
-scratch, which is what makes the company overview panel (below) fast. Note
-this only ever reflects **Google Sheets** in that folder — contacts that
-only exist as a local CSV (e.g. sourced before "Push to Sheet" was ever used
-for that company) won't show up here. A separate, always-on check compares
-against the local CSVs in `../Apollo Lead Generation/` regardless of whether
-Sheets export is configured at all.
+### Job Signals
 
-## How a run works
+Pull live hiring signals from **MyCareersFuture** and identify companies whose hiring activity may indicate relevant business needs.
 
-The app has two tabs: **Lead Sourcing** (below) and **Outreach Studio** (see
-[Outreach email generator](#outreach-email-generator)). Lead Sourcing runs in
-three stages, with a deliberate gate in the middle.
+Listings are:
 
-**1. Search — free.** Enter a company name or domain. Apollo's people-search
-endpoint costs **zero credits** and returns no emails, so the net is cast wide.
-If several organizations match, you pick the right one — group structures often
-split across domains (Sunway's corporate HQ vs its mall business unit).
+- Classified against the same department taxonomy used for prospecting
+- Scored using seniority, posting recency, and existing prospect coverage
+- Filtered to remove recruitment/staffing agencies
+- Connected directly to Outreach Studio for signal-based messaging
 
-Four filters sit directly under the search box — **region**, **countries**,
-**departments** and **seniority** — because those are what change run to run.
-They override your saved defaults for that search only. Picking a region fills
-in its countries; you can then adjust individual countries freely.
+### News Triggers
 
-Apollo masks surnames at this stage ("Ga***i") and withholds location and
-LinkedIn until you pay. That is Apollo's behaviour, not a limitation of this
-app — the full details arrive at enrichment. Short surnames like "Lim" just
-look intact because there is nothing to mask.
+Surface company news that may create a timely reason for outreach.
 
-Once a company is picked, an optional **"Load company profile"** button
-appears — industry, headcount, HQ, founding year, and funding stage, pulled
-from Apollo's organization data. It's a button, not automatic, because unlike
-search this call **costs 1 Apollo credit** — it's there to help you sanity-check
-you've picked the right entity (or size up a company) before spending a real
-search on it, not something that fires on every click.
+News signals can be grouped by company and filtered by region, allowing users to move from a relevant business event directly into the outreach workflow.
 
-**2. Review — the credit gate.** Every candidate appears with a score and the
-rule that matched, so you can see *why* someone was kept or dropped. Nothing has
-cost anything yet, and the estimated credit range is shown before you commit.
+### Run History
 
-Each row also shows whether Apollo **has an email** for that person. Only people
-with one are pre-ticked, because those without will almost certainly fail
-enrichment — this is the direct fix for runs that landed 7 contacts against a
-target of 20. Anyone already present in an existing CSV is flagged and skipped.
+Completed sourcing runs are recorded with:
 
-A filter bar above the table narrows what's already been returned — by name or
-title, by department, or to people with an email. It's instant and costs
-nothing, since it filters results you already have rather than re-searching.
-"Select visible" then ticks exactly what's on screen.
+- Company
+- Date
+- Contacts sourced
+- Contacts dropped
+- Credits consumed
+- Waterfall recovery
+- User
 
-**3. Enrich — this spends credits.** Only the people you ticked are submitted, in
-batches of 10. Results run through three guards before reaching the CSV:
+This provides a lightweight audit trail and makes it easier to compare sourcing performance over time.
 
-- **No email** → dropped (costs 0 credits; Apollo doesn't charge for a miss).
-- **Personal domain** (gmail, yahoo, …) → dropped.
-- **Wrong employer** → dropped. Apollo can return a "verified" email belonging to
-  a *different* concurrent employer; the IOI Properties run surfaced
-  `siew_low@skyworld.my` for an IOI contact. A verified email at the wrong
-  company is worse than no email, so the app checks the domain and rejects
-  mismatches.
+---
 
-If waterfall is enabled, contacts that found no email get one retry pass through
-Apollo's third-party sources, capped (default 10 per company).
+## Why the workflow is structured this way
 
-Then: summary with credits used, success/failure counts, an itemised issues log,
-CSV download, and a ready-to-paste run-log row for `context.md`.
+Apollo separates discovery from paid enrichment, so the application deliberately introduces a review gate before credits are spent.
 
-Every completed run is also logged automatically to **Run History**
-(`/history`, linked from the header) — company, date, contacts sourced,
-credits used, and who ran it. This is a supplement to the `context.md`
-run-log row above, not a replacement for it; see [Run History](#run-history)
-below.
+### 1. Search
 
-## Filters
+Apollo's people-search endpoint is used to generate a broad candidate pool.
 
-At `/filters`, in two tabs. Everything is stored in `data/settings.json`, which
-is gitignored — your tuning stays local. "Reset to defaults" restores the values
-transcribed from `context.md` in `criteria.default.json`.
+Users can adjust:
 
-### Simple — describe the persona
+- Region
+- Countries
+- Departments
+- Seniority
 
-Write who you want to reach in plain English ("heads of customer experience at
-banks in Singapore and Malaysia"). Claude reads it and proposes the criteria:
-departments, seniority, locations, job titles, exclusions. The field's border
-cycles through the spectrum while it thinks.
+Search results are then evaluated against local relevance rules.
 
-You always see the proposal before it applies — including a one-line read-back
-of what it understood and a rationale naming anything it inferred rather than
-was told, so a wrong guess is visible instead of silent. Applying it merges the
-keywords into the existing `context.md` rules rather than replacing them.
+### 2. Review
 
-Save a persona as a preset to reuse it. Presets live in `data/presets.json`.
+Each candidate is shown with:
 
-### How it works — and why there's no API key
+- Match score
+- Matching rule
+- Department
+- Seniority
+- Email availability
+- Existing-contact status
 
-Three steps: the app builds a prompt from your description, you run it in Claude
-yourself, you paste the answer back.
+Users decide exactly who should proceed to enrichment before any paid reveal occurs.
 
-1. **Describe** the persona and press "Build the prompt".
-2. **Copy** it into Claude — claude.ai, the desktop app, or a Claude Code
-   session. Any plan works, including Pro.
-3. **Paste** the JSON reply back. A code fence or a sentence of preamble is
-   stripped for you.
+### 3. Enrich
 
-This is deliberate, not a limitation we failed to remove. **A Claude Pro or Max
-subscription does not include API access** — Anthropic's own help centre is
-explicit that paid plans and the Console are separate products — and since
-February 2026 Anthropic prohibits using subscription OAuth credentials to
-authenticate third-party applications. So an app cannot call Claude on your
-subscription's behalf. A person running a prompt can.
+Only selected contacts are enriched.
 
-The upside is that this tab needs **no credentials, no API key, and costs
-nothing** beyond a plan you already have. The app makes no network call here at
-all; `lib/persona.ts` is pure string handling.
+Before an enriched contact is accepted, the system checks for:
 
-Whatever comes back is validated against the taxonomy before it is applied —
-department ids, seniorities and country names outside the allowed lists are
-discarded rather than silently passed to Apollo.
+- Missing email
+- Personal email domains
+- Employer/domain mismatches
+- Previously sourced contacts
 
-### Advanced — every criterion directly
+This matters because a technically verified email can still belong to a contact's unrelated or concurrent employer. Employer validation prevents that data from entering the outbound pipeline.
 
-- **Waterfall** on/off and its per-company cap
-- **Contacts per company** (default 20)
-- **Filename override** (default: the company name, per convention)
-- **Phone column** (off — none of the shipped CSVs have one; phone reveals cost
-  roughly 8 extra credits each)
-- **Search criteria** sent to Apollo: titles, seniorities, locations
-- **Relevance rules** applied locally at no cost
+If enabled, contacts without an email can receive a capped waterfall-enrichment retry.
 
-## Outreach email generator
+---
 
-On the main dashboard, below the sourcing workflow. Generates a multi-email
-outreach sequence scoped to either a **company** or an **industry** — pick the
-scope, enter the target and any extra context, and it calls OpenAI
-(`app/api/generate-template/route.ts`, `OPENAI_API_KEY` required) for a named
-campaign: a sequencing rationale plus subject/body per email.
+## Lead qualification
 
-You can ask for a **revision** in plain English (e.g. "make the second email
-shorter") without starting over, and **save the result as a Google Doc**
-(`lib/docs.ts`) into the same Drive folder used for Sheets export
-(`GOOGLE_PARENT_FOLDER_ID`) — so it needs the Google service account set up too
-if you want that step, not just the OpenAI key.
+Lead relevance is not based on a single keyword list.
 
-## Job Signals
-
-A fourth workspace tab, "✦ Job Signals" — live hiring-signal listings from
-**MyCareersFuture**, Singapore's official government job portal. No API key
-and no setup: it's a genuinely public, unauthenticated endpoint, which is
-also why this tab behaves differently from News Triggers — it fetches fresh
-data on every page load and every browser refresh, rather than waiting for a
-manual "refresh" click. There's nothing to spend, so there's no reason to
-gate it.
-
-Each listing is matched against the same department taxonomy used for Apollo
-person search (Customer Experience, Digital Transformation, Consumer/Retail
-Banking, etc.), scored 0–100 without any AI call — the score comes from
-seniority, how recently the role was posted, and (the strongest signal) 30
-extra points if the hiring company already has contacts sourced in
-`../Apollo Lead Generation/`. Recruitment/staffing agencies (identified by
-Singapore's official SSIC industry code for that category) are filtered out
-before scoring, so a posting is never misattributed to a headhunter instead
-of their undisclosed client.
-
-Click "Generate outreach" on any card to pre-fill the Outreach Studio with
-the specific role, company, and reasoning as the timely angle for a first
-touch — same pattern as generating outreach from a News Trigger.
-
-**Coverage is Singapore-only.** A handful of companies already in
-`Apollo Lead Generation/` are based in Malaysia, Thailand, or Indonesia and
-will never show up here — this complements the pipeline's Singapore reach,
-it doesn't replace the rest.
-
-## Colour
-
-Colour is bound to function, not decoration. Each workflow step owns a hue that
-says what it costs you — indigo while searching (free), amber at the review gate
-(about to spend), green on the result (banked) — and the 12 departments each
-have a categorical hue shown as a dot beside its always-present label, so colour
-is never the only thing carrying meaning.
-
-### The three tiers of exclusion
-
-This distinction matters, and it exists because a flat keyword list gets real
-cases wrong:
+The filtering system distinguishes three levels of negative evidence:
 
 | Tier | Behaviour | Example |
 |---|---|---|
-| **Exclude** | Always drops, even with a CX keyword present | `H2H Digital Channels` matches "digital channels" but is corporate treasury |
-| **Conditional exclude** | Drops *unless* a CX keyword also matches | `Wealth Management` drops, but `Consumer Banking and Wealth Management` is kept |
-| **Negative signal** | Drops *unless* a CX keyword also matches, softer intent | `Business Insights` drops, `Customer Experience Insights` is kept |
+| **Exclude** | Always rejected | A clearly irrelevant corporate function |
+| **Conditional exclude** | Rejected unless a strong relevant signal is also present | Wealth Management vs. Consumer Banking & Wealth Management |
+| **Negative signal** | Softer exclusion that can be overridden by strong relevance | Business Insights vs. Customer Experience Insights |
+
+This allows mixed-function titles to be handled more accurately than a flat allow/block list.
+
+Search criteria and relevance rules can be configured from the application's filter settings.
+
+---
+
+## Technical highlights
+
+### Credit-aware architecture
+
+Search, review, and enrichment are deliberately separated so expensive API operations happen only after user approval.
+
+### Explainable filtering
+
+Candidates are shown alongside the rule that caused them to be included or excluded, making the sourcing logic auditable instead of opaque.
+
+### Duplicate prevention
+
+The application can compare new prospects against previously sourced contacts stored in Google Sheets and local sourcing outputs.
+
+Google Sheet contact data is cached in memory after the initial scan so duplicate checks do not repeatedly traverse Drive.
+
+### Server-side credential handling
+
+Apollo, OpenAI, and Google credentials are used server-side and are never sent to the browser.
+
+### Multi-source outbound intelligence
+
+The dashboard combines:
+
+- Apollo prospect data
+- Existing outreach history
+- MyCareersFuture hiring signals
+- Google News company signals
+- Google Drive / Sheets campaign data
+
+to give users context before initiating outreach.
+
+### Offline regression tests
+
+The project includes **122 offline tests** covering sourcing and qualification behaviour.
+
+The test cases are derived from real sourcing decisions so rule changes can be checked against previously agreed outcomes without consuming external API credits.
+
+---
+
+## Tech stack
+
+**Frontend / application**
+- Next.js
+- React
+- TypeScript
+
+**Prospecting & enrichment**
+- Apollo API
+
+**AI**
+- OpenAI API
+
+**Google integrations**
+- Google Sheets
+- Google Drive
+- Google Docs
+- Service-account authentication
+
+**Outreach**
+- GMass
+
+**Signals**
+- MyCareersFuture
+- Google News
+
+**Testing**
+- Offline unit/regression test suite
+
+---
+
+## Quick start
+
+### Requirements
+
+- Node.js 20+
+- Apollo API key
+
+Google integrations, OpenAI, and GMass are optional depending on which features you want to use.
+
+```bash
+git clone <repository-url>
+cd apollo-dashboard
+
+npm install
+cp .env.local.example .env.local
+
+npm run check-key
+npm run dev
+```
+
+The application runs locally at:
+
+```text
+http://localhost:3100
+```
+
+---
+
+## Environment variables
+
+Start from:
+
+```bash
+cp .env.local.example .env.local
+```
+
+The main integrations use environment variables such as:
+
+```env
+APOLLO_API_KEY=
+
+OPENAI_API_KEY=
+
+GOOGLE_SERVICE_ACCOUNT_EMAIL=
+GOOGLE_PRIVATE_KEY=
+GOOGLE_SHEET_ID=
+GOOGLE_PARENT_FOLDER_ID=
+
+GMASS_API_KEY=
+GMASS_FROM_EMAIL=
+
+NEXT_PUBLIC_APP_URL=
+```
+
+Do not commit `.env.local` or real credentials.
+
+---
+
+## Apollo setup
+
+Create an API key from:
+
+**Apollo → Settings → Integrations → API → API Keys**
+
+The application uses Apollo for organization search, people search, enrichment, credit tracking, and contact/list management.
+
+The key is read only on the server.
+
+---
+
+## Google Sheets / Drive setup
+
+Google integrations use a service account rather than a personal API key.
+
+See [`GOOGLE_SHEETS_SETUP.md`](./GOOGLE_SHEETS_SETUP.md) for setup instructions.
+
+Once configured, the application can:
+
+- Detect previously sourced contacts
+- Push sourcing results to Sheets
+- Save outreach sequences to Google Docs
+- Work with files inside a configured Drive folder
+
+You can verify the integration with:
+
+```bash
+npm run check-drive
+```
+
+---
+
+## OpenAI setup
+
+`OPENAI_API_KEY` enables AI-assisted outreach generation and revision.
+
+Without an OpenAI key, the core Apollo sourcing workflow continues to work; only AI-powered outreach generation is unavailable.
+
+---
 
 ## Output
 
-CSVs use the exact schema of the 19 existing files:
+Sourced contacts use the following export schema:
 
-```
+```text
 firstname,lastname,title,company,seniority,email,email_status,linkedin_url,location,apollo_person_id
 ```
 
-"Download CSV" saves through the browser. "Save to Apollo Lead Generation folder"
-writes straight into `../Apollo Lead Generation/` — possible because this runs
-locally. Set `OUTPUT_DIR` in `.env.local` to point somewhere else.
+Results can be:
 
-## Tag in Apollo
+- Downloaded as CSV
+- Saved to the configured sourcing directory
+- Pushed to Google Sheets
+- Added to an Apollo list
+- Passed into the outreach workflow
 
-A fourth result-screen action, alongside Download/Save/Push to Sheet: adds the
-just-sourced contacts to a named Apollo list (Apollo's UI calls these
-**Labels**) — pick an existing list or name a new one. This is what lets the
-team filter Apollo's own CRM to exactly what this app sourced, without a
-second data store to keep in sync.
+---
 
-It costs **0 credits** — unlike search or enrichment, listing and tagging
-contacts is free on every Apollo plan. Under the hood it creates (or, if a
-matching email already exists, finds) each person as a real Apollo Contact and
-applies the list in the same call — a step this app has to do itself, since
-Apollo's list API only accepts existing Contact records, not the raw
-prospect-search results this app sources from. It's still a manual button
-rather than automatic, because unlike a local CSV or a private Google Sheet,
-an Apollo list is visible to your whole team the moment it's created.
+## Testing
 
-## Run History
-
-`/history` lists every enrichment run completed on this machine — date,
-company, contacts landed, contacts dropped, credits used, waterfall recovery
-rate, and who ran it — plus running totals across all of them. It's written
-automatically by `app/api/enrich/route.ts` the moment a run finishes, via
-`lib/history.ts`, to `data/runs.json` (gitignored, same as
-`data/settings.json`).
-
-This is **local to each install**, same as everything else under `data/` —
-if you and a colleague each run your own copy of the app, you each see only
-your own history. It's meant to replace the manual step of copying a
-run-summary line into `context.md`, not to be a shared team dashboard (that
-needs the AWS deployment described in `AWS_DEPLOYMENT_NOTES.md`, which moves
-this to a real shared datastore).
-
-## Tests
+Run the complete offline test suite with:
 
 ```bash
 npm test
 ```
 
-122 tests, all offline — no API calls, no credits. The cases come from real
-decisions in `context.md`, especially the 2026-08-04 relevance audit, so a
-failure here means the app has drifted from the agreed criteria.
+The suite currently contains **122 tests** and does not call Apollo or consume API credits.
 
-## Sharing with colleagues
+---
 
-Each person clones the repo, runs `npm install`, and adds a key to their own
-`.env.local`. If you share one team key, remember everyone draws from the same
-credit pool.
+## Documentation
 
-One consequence worth knowing: the "credits used" figure in the run summary is a
-before/after snapshot of the account balance, so **concurrent use by a colleague
-inflates it**. Observed during development: 16 credits disappeared between two
-readings while only free searches were running locally. If the number looks
-wrong, that is usually why — the per-contact reality is roughly 1 credit for a
-standard reveal and 3 for a waterfall.
+More detailed documentation is available for different audiences:
 
-There is no authentication — do not expose this to the internet as-is. It binds
-to localhost by design.
+- [`USER_MANUAL.md`](./USER_MANUAL.md) — step-by-step non-technical guide to using the application
+- [`CODEBASE_GUIDE.md`](./CODEBASE_GUIDE.md) — plain-language overview of the codebase and project structure
+- [`AGENTS.md`](./AGENTS.md) — detailed technical and implementation reference
+- [`INTERNAL_WORKFLOW.md`](./INTERNAL_WORKFLOW.md) — detailed operational behaviour and workflow notes
+- [`GOOGLE_SHEETS_SETUP.md`](./GOOGLE_SHEETS_SETUP.md) — Google service-account and Sheets/Drive setup
+- [`AWS_DEPLOYMENT_NOTES.md`](./AWS_DEPLOYMENT_NOTES.md) — notes for adapting the current local architecture to a shared deployment
 
-## Troubleshooting
+---
 
-**"APOLLO_API_KEY is not set"** — create `.env.local` (not `.env`) and restart
-`npm run dev`; Next.js only reads env files at startup.
+## Current deployment model
 
-**Key rejected (401/403)** — the key may lack master scope, or the plan may not
-include API access. `npm run check-key` will tell you which.
+The application currently runs as a **local, single-user tool**.
 
-**Credits show "—"** — the app returns null rather than guessing if the usage
-endpoint is unavailable. Harmless; everything else still works.
+Several behaviours intentionally rely on local files and local state, including run history and configurable sourcing settings.
 
-**"Cannot find module './331.js'" or random 500s** — the `.next` cache is
-corrupted, usually from running `npm run build` while `npm run dev` was live.
-Stop the server, `rm -rf .next`, and start it again.
+There is currently no application authentication layer, so the project should **not be exposed publicly as-is**.
 
-**Search returns nobody** — the company may be matched to the wrong Apollo org.
-Try the domain (`dbs.com`) instead of the name, or widen the title list in
-Settings.
+A production/shared deployment would require changes including:
 
-**Surnames look like `Ch***n`** — expected. Apollo masks them until enrichment;
-the CSV gets the real name.
+- Authentication and authorization
+- Shared persistent storage
+- Production secret management
+- Multi-user state handling
+- Deployment-safe output/storage paths
 
-**Waterfall logs a "failed" webhook status** — also expected, and not an error.
-The app deliberately sends an unreachable webhook URL so that no third party
-receives your prospects' data, then polls Apollo for the result. Delivery fails;
-the enrichment succeeds. `AGENTS.md` explains the mechanism.
+See [`AWS_DEPLOYMENT_NOTES.md`](./AWS_DEPLOYMENT_NOTES.md) for the existing deployment considerations.
+
+---
+
+## Screenshots
+
+_Add 3–4 screenshots here before using the repository as a portfolio link._
+
+Suggested screenshots:
+
+1. Lead Sourcing search/review screen
+2. Enrichment results
+3. Outreach Studio
+4. Job Signals or News Triggers

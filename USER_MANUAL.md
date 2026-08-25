@@ -34,7 +34,7 @@ that happens.)
 ## 2. Before you start
 
 You need two things set up once, by whoever installed the app for you (or by
-following `README.md`):
+following `INTERNAL_WORKFLOW.md`):
 
 1. **Node.js installed**, the app's dependencies installed (`npm install`).
 2. **An Apollo API key** pasted into a file called `.env.local`. This is
@@ -347,4 +347,4 @@ That feature needs an admin to configure a Google service account first —
 ask them, or read `GOOGLE_SHEETS_SETUP.md`.
 
 For anything not covered here, see the **Troubleshooting** section of
-`README.md`, or ask whoever maintains the app.
+`INTERNAL_WORKFLOW.md`, or ask whoever maintains the app.

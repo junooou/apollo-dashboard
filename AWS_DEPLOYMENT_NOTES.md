@@ -9,9 +9,9 @@
 > for a dedicated "deployment cleanup" pass; by then the reasons will be
 > forgotten. Whoever does the actual AWS deployment should treat this file as
 > the punch list, not `AGENTS.md` (which stays focused on how the app works
-> today) or `README.md` (which stays focused on local setup).
+> today) or `INTERNAL_WORKFLOW.md` (which stays focused on local setup).
 
-As of this writing the app still runs exactly as `README.md` describes: one
+As of this writing the app still runs exactly as `INTERNAL_WORKFLOW.md` describes: one
 person, one laptop, `npm run dev`, `localhost:3100`, no authentication, files
 on local disk. Nothing below has been changed yet — this file exists so the
 AWS work has a concrete list to work from once it starts, rather than
@@ -24,7 +24,7 @@ discovering each of these live.
 These apply to the app as a whole, not to any one feature — read this section
 first before diffing individual features below.
 
-1. **No authentication exists today.** `README.md` states outright: *"There
+1. **No authentication exists today.** `INTERNAL_WORKFLOW.md` states outright: *"There
    is no authentication — do not expose this to the internet as-is."* A
    public or even VPC-internal AWS deployment reachable by the whole company
    needs real auth (SSO via the company's existing identity provider is the

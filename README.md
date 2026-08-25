@@ -370,16 +370,3 @@ A production/shared deployment would require changes including:
 - Deployment-safe output/storage paths
 
 See [`AWS_DEPLOYMENT_NOTES.md`](./docs/AWS_DEPLOYMENT_NOTES.md) for the existing deployment considerations.
-
----
-
-## Screenshots
-
-_Add 3–4 screenshots here before using the repository as a portfolio link._
-
-Suggested screenshots:
-
-1. Lead Sourcing search/review screen
-2. Enrichment results
-3. Outreach Studio
-4. Job Signals or News Triggers

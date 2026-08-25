@@ -285,7 +285,7 @@ The key is read only on the server.
 
 Google integrations use a service account rather than a personal API key.
 
-See [`GOOGLE_SHEETS_SETUP.md`](./GOOGLE_SHEETS_SETUP.md) for setup instructions.
+See [`GOOGLE_SHEETS_SETUP.md`](./docs/GOOGLE_SHEETS_SETUP.md) for setup instructions.
 
 Once configured, the application can:
 
@@ -344,12 +344,12 @@ The suite currently contains **122 tests** and does not call Apollo or consume A
 
 More detailed documentation is available for different audiences:
 
-- [`USER_MANUAL.md`](./USER_MANUAL.md) — step-by-step non-technical guide to using the application
-- [`CODEBASE_GUIDE.md`](./CODEBASE_GUIDE.md) — plain-language overview of the codebase and project structure
+- [`USER_MANUAL.md`](./docs/USER_MANUAL.md) — step-by-step non-technical guide to using the application
+- [`CODEBASE_GUIDE.md`](./docs/CODEBASE_GUIDE.md) — plain-language overview of the codebase and project structure
 - [`AGENTS.md`](./AGENTS.md) — detailed technical and implementation reference
-- [`INTERNAL_WORKFLOW.md`](./INTERNAL_WORKFLOW.md) — detailed operational behaviour and workflow notes
-- [`GOOGLE_SHEETS_SETUP.md`](./GOOGLE_SHEETS_SETUP.md) — Google service-account and Sheets/Drive setup
-- [`AWS_DEPLOYMENT_NOTES.md`](./AWS_DEPLOYMENT_NOTES.md) — notes for adapting the current local architecture to a shared deployment
+- [`INTERNAL_WORKFLOW.md`](./docs/INTERNAL_WORKFLOW.md) — detailed operational behaviour and workflow notes
+- [`GOOGLE_SHEETS_SETUP.md`](./docs/GOOGLE_SHEETS_SETUP.md) — Google service-account and Sheets/Drive setup
+- [`AWS_DEPLOYMENT_NOTES.md`](./docs/AWS_DEPLOYMENT_NOTES.md) — notes for adapting the current local architecture to a shared deployment
 
 ---
 
@@ -369,7 +369,7 @@ A production/shared deployment would require changes including:
 - Multi-user state handling
 - Deployment-safe output/storage paths
 
-See [`AWS_DEPLOYMENT_NOTES.md`](./AWS_DEPLOYMENT_NOTES.md) for the existing deployment considerations.
+See [`AWS_DEPLOYMENT_NOTES.md`](./docs/AWS_DEPLOYMENT_NOTES.md) for the existing deployment considerations.
 
 ---
 

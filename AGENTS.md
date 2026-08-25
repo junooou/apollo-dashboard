@@ -13,7 +13,7 @@ filtering logic.** It is the source of truth for who counts as a relevant
 contact, and it records the reasoning behind decisions that look arbitrary.
 
 **This app is being moved to AWS for team-wide use.** It still runs locally
-today (single user, local files, no auth) — see **`AWS_DEPLOYMENT_NOTES.md`**
+today (single user, local files, no auth) — see **`docs/AWS_DEPLOYMENT_NOTES.md`**
 for the running list of what has to change before/during that move, and add to
 it whenever you build something that assumes local, single-user operation
 (local file storage, an OS username as an identity, etc.).
@@ -352,7 +352,7 @@ create/append/update/pushContacts) — otherwise a push in the same session
 would silently not show up in the next check until the server restarts. This
 cache is per-process, in server memory, not a file — it does not persist
 across restarts and, once this runs as multiple AWS instances behind a load
-balancer, will not be consistent across them; see `AWS_DEPLOYMENT_NOTES.md`.
+balancer, will not be consistent across them; see `docs/AWS_DEPLOYMENT_NOTES.md`.
 
 An `instrumentation.ts` `register()` hook was tried to start this scan at
 server-process boot rather than waiting for a browser tab — **reverted**,
